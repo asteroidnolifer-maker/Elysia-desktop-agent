@@ -1,0 +1,37 @@
+{
+  "workspace": {
+    "root": "workspace",
+    "max_read_chars": 9000
+  },
+  "scheduler": {
+    "max_concurrency": 4,
+    "max_attempts": 3,
+    "lease_seconds": 1200,
+    "heartbeat_grace_s": 60,
+    "resource_reserve_mb": 1536,
+    "worker_est_mb": 600
+  },
+  "git": {
+    "auto_checkpoint": false,
+    "checkpoint_prefix": "elysia-checkpoint"
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8087,
+    "rate_limit_per_min": 60
+  },
+  "providers": [
+    {
+      "kind": "openai",
+      "label": "local",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": "none",
+      "model": "qwen2.5-coder:7b",
+      "capabilities": ["chat", "coding"],
+      "concurrency": 2,
+      "timeout_s": 900,
+      "max_tokens": 2048,
+      "temperature": 0.2
+    }
+  ]
+}
