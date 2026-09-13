@@ -56,11 +56,14 @@ def init_db():
 
 
 def add_task(title, description, files=None, priority=5, read_files=None,
-             dependencies=None, max_attempts=3):
+             dependencies=None, max_attempts=3, kind="task", workflow=None,
+             agent_role=None, dedup_hash=None, timeout_s=None):
     return store().add_task(
         title, description or title, owned_files=files or [],
         read_files=read_files or [], dependencies=dependencies or [],
-        priority=priority, max_attempts=max_attempts)
+        priority=priority, max_attempts=max_attempts, kind=kind,
+        workflow=workflow, agent_role=agent_role, dedup_hash=dedup_hash,
+        timeout_s=timeout_s, status="ready" if not (dependencies or []) else "queued")
 
 
 def claim_task(worker, max_priority=None):
@@ -86,7 +89,8 @@ def _legacy(t):
     out["files"] = json.dumps(out.get("owned_files") or [])
     out["session"] = None
     from datetime import datetime, timezone
-    for k in ("created_at", "claimed_at", "completed_at"):
+    for k in ("created_at", "claimed_at", "completed_at", "started_at",
+              "scheduled_at"):
         v = out.get(k)
         if isinstance(v, float):
             out[k] = datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
@@ -111,7 +115,8 @@ def release_stale(worker):
     s = store()
     for t in s.list(status="claimed"):
         if t.get("worker") == worker:
-            s._update(t["id"], status="open", worker=None, provider=None, model=None)
+            s._update(t["id"], status="ready", worker=None, provider=None, model=None,
+                      lease_expires_at=None)
     con = connect()
     try:
         con.execute("DELETE FROM locks WHERE worker=?", (worker,))
@@ -145,7 +150,7 @@ if __name__ == "__main__":
         init_db()
         status_arg = sys.argv[2] if len(sys.argv) > 2 else None
         for t in list_tasks(status_arg):
-            print(f"#{t['id']} [{str(t['status']):>10}] p{t['priority']} worker={t.get('worker')} :: {t['title']}")
+            print(f"#{t['id']} [{str(t['status']):>12}] p{t['priority']} worker={t.get('worker')} :: {t['title']}")
     elif cmd == "claim":
         init_db()
         t = claim_task(sys.argv[2])

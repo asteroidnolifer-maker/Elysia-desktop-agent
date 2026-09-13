@@ -76,8 +76,10 @@ class TestScheduler(unittest.TestCase):
         store = self._store()
         a = store.add_task("A", owned_files=["a.py"])
         b = store.add_task("B", owned_files=["b.py"], dependencies=[a])
+        # tasks default to queued; mark ready to be dispatchable
+        store.mark_ready(a)
+        store.mark_ready(b)
         ready = store.ready_tasks()
-        # only A (no deps) is ready; B waits for A
         self.assertEqual([t["id"] for t in ready], [a])
 
         store.complete(a, "done", "ok")
@@ -87,8 +89,10 @@ class TestScheduler(unittest.TestCase):
     def test_claim_and_expiry(self):
         store = self._store()
         tid = store.add_task("T", owned_files=["t.py"])
+        store.mark_ready(tid)
         pm = ProviderManager()
-        pm.register(ProviderConfig(kind="openai", label="p", model="m", concurrency=2))
+        pm.register(ProviderConfig(kind="openai", label="p", model="m",
+                                   concurrency=2))
         ev = EventBus()
         s = Scheduler(store, pm, ev, cfg=fake_cfg(lease_seconds=1, max_attempts=2))
         claimed = s.dispatch_once()
@@ -103,21 +107,44 @@ class TestScheduler(unittest.TestCase):
 
         # simulate crash: wait until lease expires, release_expired reopens
         import time
-        time.sleep(1.2)
+        time.sleep(1.2 if "CI" not in os.environ else 1.5)
         released = store.release_expired(max_attempts=2)
         self.assertEqual(released, [tid])
-        self.assertEqual(store.get(tid)["status"], "open")
+        self.assertEqual(store.get(tid)["status"], "ready")
 
     def test_lease_retries_then_fails(self):
         store = self._store()
-        # pre-seed attempts = max so release fails it
         tid = store.add_task("T", owned_files=["t.py"], max_attempts=1)
+        store.mark_ready(tid)
         store.claim(tid, "w", "p", "m", 1)
         import time
-        time.sleep(1.2)
+        time.sleep(1.2 if "CI" not in os.environ else 1.5)
         released = store.release_expired(max_attempts=1)
         self.assertEqual(released, [])
         self.assertEqual(store.get(tid)["status"], "failed")
+
+    def test_dependency_failure_propagates(self):
+        store = self._store()
+        a = store.add_task("A", owned_files=["a.py"])
+        b = store.add_task("B", owned_files=["b.py"], dependencies=[a])
+        store.mark_ready(a)
+        store.mark_ready(b)
+        store.complete(a, "failed", "boom")
+        affected = store.failed_after_dependency(a)
+        self.assertEqual(affected, [b])
+        self.assertEqual(store.get(b)["status"], "dependency_failed")
+
+    def test_cancel_pause_resume(self):
+        store = self._store()
+        a = store.add_task("A")
+        store.mark_ready(a)
+        self.assertEqual(store.pause(a), True)
+        self.assertEqual(store.get(a)["status"], "queued")
+        self.assertEqual(store.resume(a), True)
+        self.assertEqual(store.get(a)["status"], "ready")
+        affected = store.cancel(a, by="cli")
+        self.assertIn(a, affected)
+        self.assertEqual(store.get(a)["status"], "cancelled")
 
     def test_event_emission(self):
         ev = EventBus()
