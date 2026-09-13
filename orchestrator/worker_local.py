@@ -2,9 +2,13 @@
 """
 Elysia worker_local.py — one lightweight agent instance (NO opencode).
 
-Loop: claim task from the SQLite board -> prompt the LOCAL model via brain.py
--> parse file blocks -> write them into the workspace -> QA-check -> mark
-done/failed -> claim next. Bounded: max 2 model calls per task (1 + 1 retry).
+Loop: claim task from the SQLite board -> prompt the model via brain.py (any
+configured provider) -> parse file blocks -> write them into the workspace
+(secure path validation, no traversal) -> QA-check (language-aware) -> mark
+done/failed -> claim next.
+
+Secure workspace: every write goes through elysia.core.paths.resolve_path and
+is REJECTED if it escapes the workspace — never silently remapped or sanitized.
 
 Usage: worker_local.py <workerID> <workspaceDir> [maxTasks]
 """
@@ -16,11 +20,14 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import brain  # noqa: E402
+from elysia.core.paths import PathEscapeError, resolve_path  # noqa: E402
+from elysia.core.workspace import Workspace  # noqa: E402
 
 ORCH_DIR = os.path.dirname(os.path.abspath(__file__))
 TASKBOARD = os.path.join(ORCH_DIR, "taskboard.py")
-REPO_ROOT = os.path.dirname(ORCH_DIR)   # /data/elysia-run (read-only context)
+REPO_ROOT = os.path.dirname(ORCH_DIR)
 
 # ---------- context attach: give the model the REAL files, not just names ----
 # The 1.5B model hallucinates "document this code" tasks when it only sees file
@@ -82,15 +89,26 @@ def render_file(rel, text, used):
 
 
 def find_reference(rel):
-    """Locate a referenced file in the workspace or the repo root."""
-    rel = rel.lstrip("./").lstrip("/")
-    if ".." in rel:
-        return None
-    for base in (WS_DIR_FALLBACK, REPO_ROOT):
-        cand = os.path.join(base, rel)
-        if os.path.isfile(cand) and not any(
+    """Locate a referenced file in the workspace or the repo root.
+
+    Uses canonical resolution so traversal/symlink escapes are rejected.
+    """
+    base = WS_DIR_FALLBACK
+    try:
+        safe = resolve_path(base, rel)
+        if os.path.isfile(safe) and not any(
                 part in SKIP_DIRS for part in rel.split("/")):
-            return cand
+            return safe
+    except PathEscapeError:
+        pass
+    # fall back to repo-root read-only reference lookup (also validated)
+    try:
+        safe = resolve_path(REPO_ROOT, rel)
+        if os.path.isfile(safe) and not any(
+                part in SKIP_DIRS for part in rel.split("/")):
+            return safe
+    except PathEscapeError:
+        pass
     return None
 
 
@@ -190,8 +208,12 @@ def grounding_ok(content, ref_texts, min_hits=2):
 def log(worker, msg):
     line = f"[{worker}] {msg}"
     print(line, flush=True)
-    with open(os.path.join(ORCH_DIR, "logs", f"worker-{worker}.log"), "a") as f:
-        f.write(line + "\n")
+    try:
+        os.makedirs(os.path.join(ORCH_DIR, "logs"), exist_ok=True)
+        with open(os.path.join(ORCH_DIR, "logs", f"worker-{worker}.log"), "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def tb(*args):
@@ -242,6 +264,7 @@ def run_jest(ws_dir, test_files):
 
 def run_task(worker, task, ws_dir):
     tid = task["id"]
+    ws = Workspace(ws_dir)   # secure workspace (canonical root)
     # taskboard returns 'files' as a JSON-encoded string — normalize it.
     raw_files = task.get("files") or []
     if isinstance(raw_files, str):
@@ -278,18 +301,21 @@ def run_task(worker, task, ws_dir):
 
         wrote, failed = [], []
         for path, content in files.items():
-            path = path.lstrip("/").replace("..", "_")  # sandbox to workspace
+            # SECURITY: the model may emit a path with traversal, an absolute
+            # path, or a symlink escape. We resolve it canonically and REJECT
+            # anything outside the workspace — never silently sanitize/remap.
             if owned and path not in owned:
                 # model mislabeled the block (e.g. wrote a directory name).
-                # Single-file task -> remap to the owned file; otherwise refuse.
-                if len(owned) == 1:
-                    log(worker, f"task #{tid}: remapping block '{path}' -> '{owned[0]}'")
-                    path = owned[0]
-                else:
-                    log(worker, f"task #{tid}: refusing out-of-scope file {path}")
-                    failed.append(f"{path}: not in owned files")
-                    continue
-            dest = os.path.join(ws_dir, path)
+                # A single-file remap would HIDE a model mistake; reject it.
+                log(worker, f"task #{tid}: refusing out-of-scope file {path}")
+                failed.append(f"{path}: not in owned files")
+                continue
+            try:
+                dest = ws.resolve(path)
+            except PathEscapeError as e:
+                log(worker, f"task #{tid}: SECURITY reject {path}: {e}")
+                failed.append(f"{path}: invalid path (rejected)")
+                continue
             ok, reason = brain.qa_check(path, content)
             if not ok:
                 failed.append(f"{path}: {reason}")
@@ -300,7 +326,7 @@ def run_task(worker, task, ws_dir):
                               "provided reference files (invented details)")
                 continue
             try:
-                os.makedirs(os.path.dirname(dest) or ws_dir, exist_ok=True)
+                os.makedirs(os.path.dirname(dest) or ws.root, exist_ok=True)
                 with open(dest, "w") as f:
                     f.write(content)
                 wrote.append(path)
@@ -330,12 +356,14 @@ def run_task(worker, task, ws_dir):
                     files2 = brain.parse_file_blocks(t2, test_files) if not err2 else {}
                     if files2:
                         for p, c in files2.items():
-                            dest = os.path.join(ws_dir, p)
                             try:
-                                os.makedirs(os.path.dirname(dest) or ws_dir, exist_ok=True)
+                                dest = ws.resolve(p)
+                                os.makedirs(os.path.dirname(dest) or ws.root, exist_ok=True)
                                 with open(dest, "w") as f:
                                     f.write(c)
-                            except OSError:
+                            except (PathEscapeError, OSError) as e:
+                                log(worker, f"task #{tid}: repair write rejected "
+                                            f"{p}: {e}")
                                 continue
                         r = run_jest(ws_dir, test_files)
                 result += f"; jest rc={r['rc']} {r['summary'][:100]}"
@@ -356,7 +384,9 @@ def run_task(worker, task, ws_dir):
 
 def main():
     worker = sys.argv[1] if len(sys.argv) > 1 else "w0"
-    ws_dir = sys.argv[2] if len(sys.argv) > 2 else "/data/elysia-run/workspace"
+    default_ws = os.environ.get("ELYSIA_WS",
+                                os.path.join(REPO_ROOT, "workspace"))
+    ws_dir = sys.argv[2] if len(sys.argv) > 2 else default_ws
     max_tasks = int(sys.argv[3]) if len(sys.argv) > 3 else 3
     os.makedirs(os.path.join(ORCH_DIR, "logs"), exist_ok=True)
 

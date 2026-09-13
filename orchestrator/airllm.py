@@ -3,20 +3,43 @@
 import os, json, time, subprocess
 from pathlib import Path
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUNTIME_DIR = os.environ.get("ELYSIA_RUNTIME",
+                             os.path.join(REPO_ROOT, "runtime"))
+
+
+def model_path(name):
+    return os.environ.get("ELYSIA_MODEL_DIR",
+                          os.path.join(RUNTIME_DIR, "models",
+                                       {"qwen1.5b": "qwen15b-q4.gguf",
+                                        "qwen3b": "qwen3b-q4.gguf",
+                                        "qwen7b": "qwen7b-q4.gguf",
+                                        "deepseek1.5b": "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
+                                        "deepseek7b": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"}[name]))
+
+
+def llama_bin():
+    return os.environ.get("ELYSIA_LLAMA_BIN",
+                          os.path.join(RUNTIME_DIR, "llama", "llama-server"))
+
+
 MODELS = {
-    "qwen1.5b": {"path": "/data/elysia/runtime/models/qwen15b-q4.gguf", "vram": 1200, "layers": 24},
-    "qwen3b": {"path": "/data/elysia/runtime/models/qwen3b-q4.gguf", "vram": 2500, "layers": 36},
-    "qwen7b": {"path": "/data/elysia/runtime/models/qwen7b-q4.gguf", "vram": 4500, "layers": 40},
-    "deepseek1.5b": {"path": "/data/elysia/runtime/models/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf", "vram": 1200, "layers": 24},
-    "deepseek7b": {"path": "/data/elysia/runtime/models/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf", "vram": 4500, "layers": 40},
+    "qwen1.5b": {"path": lambda: model_path("qwen1.5b"), "vram": 1200, "layers": 24},
+    "qwen3b": {"path": lambda: model_path("qwen3b"), "vram": 2500, "layers": 36},
+    "qwen7b": {"path": lambda: model_path("qwen7b"), "vram": 4500, "layers": 40},
+    "deepseek1.5b": {"path": lambda: model_path("deepseek1.5b"), "vram": 1200, "layers": 24},
+    "deepseek7b": {"path": lambda: model_path("deepseek7b"), "vram": 4500, "layers": 40},
 }
 
 def get_mem():
-    with open("/proc/meminfo") as f:
-        lines = f.readlines()
-    total = int(lines[0].split()[1]) // 1024
-    avail = int(lines[2].split()[1]) // 1024
-    return {"total_mb": total, "avail_mb": avail, "used_mb": total - avail}
+    try:
+        with open("/proc/meminfo") as f:
+            lines = f.readlines()
+        total = int(lines[0].split()[1]) // 1024
+        avail = int(lines[2].split()[1]) // 1024
+        return {"total_mb": total, "avail_mb": avail, "used_mb": total - avail}
+    except OSError:  # non-Linux fallback
+        return {"total_mb": 0, "avail_mb": 0, "used_mb": 0}
 
 def select_model(task="general"):
     mem = get_mem()
@@ -31,13 +54,14 @@ def start_model(name=None, port=11434):
         name, cfg = select_model()
     else:
         cfg = MODELS.get(name)
-    if not cfg or not Path(cfg["path"]).exists():
+    if not cfg or not Path(cfg["path"]()).exists():
         print(f"[-] Model not found: {name}")
         return False
-    cmd = ["/data/elysia/runtime/llama/llama-server",
+    # b10937+ llama-server drops --mlock; add it only if the binary accepts it.
+    cmd = [llama_bin(),
            "--host", "127.0.0.1", "--port", str(port),
-           "--model", cfg["path"], "--ctx-size", "8192",
-           "--parallel", "2", "--threads", "4", "--mlock"]
+           "--model", cfg["path"](), "--ctx-size", "8192",
+           "--parallel", "2", "--threads", "4"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     time.sleep(3)
     print(f"[+] Started {name} on port {port}")

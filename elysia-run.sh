@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
 # Elysia unified launcher (Linux) - starts llama-server + agent-core
 # Usage: ./elysia-run.sh [start|stop|status|restart]
+#
+# All paths derive from the repository root (portable — no /data/Elysia or
+# /data/elysia-run anywhere). Override with env vars:
+#   ELYSIA_MODEL      absolute/relative path to the GGUF (default runtime/models/qwen15b-q4.gguf)
+#   ELYSIA_RUNTIME    runtime dir            (default ./runtime)
+#   ELYSIA_WS         workspace dir          (default ./workspace)
+#   ELYSIA_MODEL_ALIAS model alias sent to llama-server (-a)
+#   ELYSIA_AGENT_BIN  path to the built agent-core binary
 
 set -euo pipefail
 
-MODEL_DIR="/data/Elysia/elysia/runtime/models"
-LLAMA_BIN="/data/Elysia/elysia/runtime/llama/llama-server"
-AGENT_DIR="/data/elysia-run/agent-core"
-AGENT_BIN="$AGENT_DIR/elysia-agent"
-WORKSPACE="/data/elysia-run/workspace"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_DIR="${ELYSIA_RUNTIME:-$ROOT/runtime}"
+MODEL_DIR="${ELYSIA_MODEL_DIR:-$RUNTIME_DIR/models}"
+LLAMA_BIN="${ELYSIA_LLAMA_BIN:-$RUNTIME_DIR/llama/llama-server}"
+AGENT_DIR="$ROOT/agent-core"
+AGENT_BIN="${ELYSIA_AGENT_BIN:-$AGENT_DIR/elysia-agent}"
+WORKSPACE="${ELYSIA_WS:-$ROOT/workspace}"
 
 PORT_LLAMA=11434
 PORT_AGENT=8085
 
 # Choose model: default qwen15b (941MB, fast), override with ELYSIA_MODEL
 MODEL="${ELYSIA_MODEL:-$MODEL_DIR/qwen15b-q4.gguf}"
-ALIAS="qwen2.5-coder:7b"
+ALIAS="${ELYSIA_MODEL_ALIAS:-qwen2.5-coder:7b}"
 
 if [[ "${1:-}" == "stop" ]]; then
   pkill -f "elysia-agent" 2>/dev/null || true

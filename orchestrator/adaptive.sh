@@ -13,7 +13,8 @@
 set -euo pipefail
 
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WS_DIR="${ELYSIA_WS:-/data/elysia/workspace}"
+REPO_ROOT="$(dirname "$ORCH_DIR")"
+WS_DIR="${ELYSIA_WS:-$REPO_ROOT/workspace}"
 RUN_DIR="$ORCH_DIR/.adaptive"
 mkdir -p "$RUN_DIR"
 PID_FILE="$RUN_DIR/pids"

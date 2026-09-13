@@ -57,6 +57,15 @@ workspace/repos/
 tmp/
 temp/
 
+# === Elysia runtime state (regenerated on use) ===
+orchestrator/.adaptive/
+orchestrator/.monitor/
+orchestrator/taskboard.sqlite*
+**/agent_audit.json
+**/*_result.json
+workspace/agent_result.json
+*.zip
+
 # === Local IDE / OS / Android local config ===
 .DS_Store
 .idea/

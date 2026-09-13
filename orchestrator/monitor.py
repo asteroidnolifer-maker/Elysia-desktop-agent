@@ -22,13 +22,16 @@ import sys
 import time
 
 ORCH_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(ORCH_DIR)
 MON_DIR = os.path.join(ORCH_DIR, ".monitor")
 os.makedirs(MON_DIR, exist_ok=True)
 ATTEMPTS_PATH = os.path.join(MON_DIR, "attempts.json")
 LOG_PATH = os.path.join(MON_DIR, "monitor.log")
 TASKBOARD = os.path.join(ORCH_DIR, "taskboard.py")
 WORKER = os.path.join(ORCH_DIR, "worker_local.py")
-WS_DIR = "/data/elysia-run/workspace"
+WS_DIR = os.environ.get("ELYSIA_WS",
+                        os.path.realpath(os.path.join(REPO_ROOT, "workspace")))
+STACK_SH = os.path.realpath(os.path.join(REPO_ROOT, "elysia-run.sh"))
 NEW_TASK_FLOOR = 1303      # only ids >= this are real tasks worth requeueing
 ARCHIVE_JUNK = True        # junk (id < floor) is never requeued, only archived
 MAX_ATTEMPTS = 3
@@ -70,7 +73,7 @@ def model_ok():
 
 def start_stack():
     log("model DOWN; attempting stack start")
-    subprocess.run(["bash", "/home/myusername/elysia/elysia-run.sh", "start"],
+    subprocess.run(["bash", STACK_SH, "start"],
                    capture_output=True, text=True, timeout=120)
     ok = model_ok()
     log("stack restart " + ("OK" if ok else "FAILED"))

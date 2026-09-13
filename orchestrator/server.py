@@ -34,19 +34,31 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ORCH_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ORCH_DIR)
+sys.path.insert(0, os.path.dirname(ORCH_DIR))
 REPO_ROOT = os.path.dirname(ORCH_DIR)
 WS_DIR = os.path.realpath(os.path.join(REPO_ROOT, "workspace"))
 DB_PATH = os.path.join(ORCH_DIR, "taskboard.sqlite")
 LOGS_DIR = os.path.join(ORCH_DIR, "logs")
 HUD_PATH = os.path.join(ORCH_DIR, "hud.html")
 JARVIS_JPG = os.path.expanduser("~/Downloads/jarvis.jpg")
-STACK_SH = os.path.realpath(os.path.join(ORCH_DIR, "..", "elysia-run.sh"))
+STACK_SH = os.path.realpath(os.path.join(REPO_ROOT, "elysia-run.sh"))
 ADAPTIVE = os.path.join(ORCH_DIR, "adaptive.sh")
 MONITOR = os.path.join(ORCH_DIR, "monitor.py")
 
-sys.path.insert(0, ORCH_DIR)
 import brain  # noqa: E402
 import taskboard  # noqa: E402
+from elysia.core.config import load_config  # noqa: E402
+from elysia.core.events import EventBus  # noqa: E402
+from elysia.core.providers import Provider, ProviderManager  # noqa: E402
+from elysia.core.paths import validate_file_list  # noqa: E402
+from elysia.core import git as elysia_git  # noqa: E402
+
+# Structured event bus + provider manager wired from the new core.
+EVENTS = EventBus(run_id="hud")
+PROVIDERS = ProviderManager()
+for _pc in load_config().providers:
+    PROVIDERS.register(_pc)
 
 
 def _load_rules():
@@ -60,7 +72,9 @@ def _load_rules():
 
 AGENT_RULES = _load_rules()
 
-MAX_DIVISION = 6          # subtask cap per /api/ask
+# Each subtask cap per /api/ask is no longer a hard global limit. The
+# scheduler/concurrency is resource- and provider-aware (elysia.core.scheduler).
+MAX_DIVISION = 6          # subtask cap per single /api/ask call
 DIV_PROMPT = None         # built lazily with the workspace inventory
 
 
@@ -149,13 +163,22 @@ def proc_up(pattern):
 
 
 def stack_health():
-    return {
+    h = {
         "model": model_ok(),
         "agent": agent_ok(),
         "pool": proc_up("adaptive\\.sh up"),
         "monitor": proc_up("monitor\\.py"),
         "stack_up": agent_ok() and model_ok(),
     }
+    # provider manager health (any provider not just the default model port)
+    h["providers"] = PROVIDERS.health_report()
+    for p in PROVIDERS.list():
+        if p.name == "local" or p.cfg.model:
+            p.check_health()
+    h["providers"] = PROVIDERS.health_report()
+    h["provider_healthy"] = any(p.status == "healthy"
+                                for p in PROVIDERS.list()) if PROVIDERS.list() else False
+    return h
 
 
 ## ----------------------------- agents -----------------------------
@@ -638,6 +661,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._api_tasks(q))
         if path == "/api/agents":
             return self._send(200, {"ok": True, "agents": agents_payload()})
+        if path == "/api/providers":
+            return self._send(200, self._api_providers())
+        if path == "/api/events":
+            return self._send(200, self._api_events(q))
         if path == "/api/agent-log":
             wid = (q.get("worker") or [""])[0]
             n = int((q.get("n") or ["30"])[0])
@@ -690,6 +717,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_state(self):
         counts = board_counts()
         agents = agents_payload()
+        EVENTS.emit("api_state", status="ok")
         return {
             "ok": True,
             "time": now_iso(),
@@ -711,6 +739,14 @@ class Handler(BaseHTTPRequestHandler):
     def _api_agents(self):
         return {"ok": True, "agents": agents_payload()}
 
+    def _api_providers(self):
+        return {"ok": True, "providers": stack_health().get("providers", [])}
+
+    def _api_events(self, q):
+        n = min(int((q.get("n") or ["100"])[0]), 500)
+        et = ((q.get("type") or [""])[0]) or None
+        return {"ok": True, "events": EVENTS.recent(n=n, event_type=et)}
+
     def _api_ask(self, body):
         goal = str(body.get("goal") or "").strip()
         if len(goal) < 8:
@@ -723,6 +759,7 @@ class Handler(BaseHTTPRequestHandler):
         added, err, pool_msg = queue_goal(goal, files_hint)
         if added is None:
             return self._send(502, {"ok": False, "error": err})
+        EVENTS.emit("goal_queued", status="ok", detail=f"{len(added)} tasks")
         return self._send(200, {"ok": True, "added": added, "pool": pool_msg,
                                 "note": "subtasks queued on the board; "
                                         "agents will pick them up"})
@@ -731,8 +768,10 @@ class Handler(BaseHTTPRequestHandler):
         action = body.get("action")
         if action == "start":
             cap = max(1, min(int(body.get("cap") or 2), 4))
+            EVENTS.emit("pool_start", status="ok", detail=f"cap={cap}")
             return self._send(200, start_pool(cap))
         if action == "stop":
+            EVENTS.emit("pool_stop", status="ok")
             return self._send(200, stop_pool())
         return self._send(400, {"ok": False,
                                 "error": "action must be start|stop"})
@@ -743,11 +782,17 @@ class Handler(BaseHTTPRequestHandler):
         files = body.get("files") or []
         if isinstance(files, str):
             files = [f.strip() for f in files.split(",") if f.strip()]
-        files = [f for f in files if isinstance(f, str) and f and ".." not in f]
+        # SECURITY: validate every owned path canonically (traversal/abs rejected).
+        try:
+            files = validate_file_list(WS_DIR, files)
+        except Exception as e:
+            return self._send(400, {"ok": False,
+                                    "error": f"invalid file path: {e}"})
         if not title or not files:
             return self._send(400, {"ok": False,
                                     "error": "title and >=1 owned file required"})
         tid = taskboard.add_task(title, desc, files, priority=5)
+        EVENTS.emit("task_added", task_id=tid, status="open")
         log(f"/api/task -> added #{tid} {title[:60]}")
         return self._send(200, {"ok": True, "added": [task_by_id(tid)]})
 

@@ -3,11 +3,12 @@
 # Usage: ./ask.sh "your prompt here"     (or: ./ask.sh < file, or interactive if no args)
 set -euo pipefail
 ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$ORCH_DIR")"
+RUN_SH="$REPO_ROOT/elysia-run.sh"
 
-if ! bash "$ORCH_DIR/../../elysia/elysia-run.sh" status 2>/dev/null | grep -q "model:    UP"; then
+if ! bash "$RUN_SH" status 2>/dev/null | grep -q "model:    UP"; then
   echo "[ask] local model is DOWN — starting stack..."
-  bash "${ORCH_DIR%orchestrator}elysia-run.sh" start >/dev/null 2>&1 || \
-    bash /home/myusername/elysia/elysia-run.sh start
+  bash "$RUN_SH" start >/dev/null 2>&1 || true
 fi
 
 if [[ $# -gt 0 ]]; then
