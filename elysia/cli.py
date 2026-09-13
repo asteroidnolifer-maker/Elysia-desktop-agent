@@ -1,0 +1,560 @@
+#!/usr/bin/env python3
+"""Elysia CLI.
+
+All commands are safe to run read-only when possible; mutating commands
+(excluding start/stop/status/checkpoint) require confirmation where destructive.
+
+Usage:
+    elysia start|stop|status [--host H] [--port P]
+    elysia doctor
+    elysia tasks [status-filter]
+    elysia task <id>
+    elysia task add <title> [--files a,b] [--priority N] [--deps 1,2]
+                           [--template feature] [--dedup]
+    elysia task cancel|cancel-cascade <id>
+    elysia task retry <id>
+    elysia task pause|resume <id>
+    elysia workers
+    elysia providers
+    elysia cost
+    elysia resources
+    elysia agents [role]
+    elysia research "<question>"
+    elysia research --deep --breadth 3 --depth 2 "<question>"  (openreacher)
+    elysia orx "<question>" [--breadth N] [--depth N]
+    elysia template <name>
+    elysia checkpoint <message>
+    elysia checkpoints [n]
+    elysia rollback <sha> [--hard]
+    elysia since-checkpoint
+    elysia skills list|import <path>
+    elysia memory search <query>
+    elysia plugins list|load <name>
+    elysia audit
+    elysia test [--unit|--chaos|--e2e]
+    elysia logs [n]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from elysia.core.config import (Config, default_config, load_config, to_dict,
+                                validate)
+from elysia.core.doctor import do_doctor, print_doctor
+
+
+def _root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _run(cmd: list, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+# -- bootstrap services --------------------------------------------------------
+def cmd_start(args):
+    script = os.path.join(_root(), "elysia-run.sh")
+    if not os.path.exists(script):
+        print("elysia-run.sh not found; run the server directly instead")
+        return 1
+    env = dict(os.environ)
+    if args.port:
+        env["ELYSIA_HTTP_ADDR"] = f":{args.port}"
+    r = subprocess.run(["bash", script, "start"], env=env)
+    return r.returncode
+
+
+def cmd_stop(_args):
+    script = os.path.join(_root(), "elysia-run.sh")
+    if os.path.exists(script):
+        return subprocess.run(["bash", script, "stop"]).returncode
+    return 0
+
+
+def cmd_status(_args):
+    cfg = load_config()
+    host, port = cfg.api.host, cfg.api.port
+    from elysia.core.doctor import _port_open
+    print(f"api       : {'UP' if _port_open(host, port) else 'down'} "
+          f"({host}:{port})")
+    for p in cfg.providers:
+        from elysia.core.providers import Provider
+        prov = Provider(p)
+        print(f"provider  : {p.label:14} {prov.check_health()}  "
+              f"(model={p.model})")
+    return 0
+
+
+# -- doctor -------------------------------------------------------------------
+def cmd_doctor(_args):
+    results = do_doctor()
+    print_doctor(results)
+    return 0 if results["ok"] else 1
+
+
+# -- tasks --------------------------------------------------------------------
+def _store():
+    from elysia.core.tasks import TaskStore
+    return TaskStore(os.path.join(_root(), "orchestrator", "taskboard.sqlite"))
+
+
+def cmd_tasks(args):
+    s = _store()
+    if args.filter:
+        rows = s.list(status=args.filter, limit=200)
+    else:
+        rows = s.list(limit=200)
+    if not rows:
+        print("(no tasks)")
+    for t in rows:
+        print(f"#{t['id']:<4} [{str(t['status']):>16}] "
+              f"p{t['priority']} {t['agent_role'] or '':14} {t['title'][:50]}")
+    print()
+    print("counts:", json.dumps(s.counts()))
+
+
+def cmd_task(args):
+    s = _store()
+    if args.action == "show":
+        t = s.get(int(args.task_id))
+        if not t:
+            print("task not found")
+            return 1
+        print(json.dumps({k: (v if not isinstance(v, float) else round(v, 2))
+                          for k, v in t.items() if k not in ("usage_json",)},
+                         indent=1, default=str))
+        return 0
+    if args.action == "add":
+        files = (args.files or "").split(",") if args.files else []
+        deps = [int(x) for x in (args.deps or "").split(",") if x]
+        kw = {"title": args.title, "owned_files": files, "priority": args.priority,
+              "dependencies": deps}
+        if args.template:
+            from elysia.core.templates import expand_template
+            ids = expand_template(args.template, args.title, store=s, **kw)
+            if args.dedup:
+                from elysia.core.templates import dedup_hash
+                for tid in ids:
+                    s._update(tid, dedup_hash=dedup_hash(args.title))
+            s.list()
+            print(f"expanded template {args.template}: task ids {ids}")
+            return 0
+        if args.dedup:
+            from elysia.core.templates import dedup_hash
+            kw["dedup_hash"] = dedup_hash(args.title)
+            dup = s.find_duplicate(kw["dedup_hash"])
+            if dup:
+                print(f"duplicate (existing #{dup['id']} {dup['status']}), not "
+                      f"added; use --no-verify to force")
+                return 0
+        tid = s.add_task(**kw)
+        s.mark_ready(tid)
+        print(f"added task #{tid}")
+        return 0
+    # state ops
+    tid = int(args.task_id)
+    if args.action == "cancel":
+        affected = s.cancel(tid, by="cli")
+        print("cancelled:", affected)
+        return 0
+    if args.action == "retry":
+        s._update(tid, attempts=0)
+        ok = s.retry(tid, reset_attempts=True)
+        print("retried" if ok else "not retryable (not terminal)")
+        return 0 if ok else 1
+    if args.action == "pause":
+        print(("paused" if s.pause(tid) else "not paused"))
+        return 0
+    if args.action == "resume":
+        print(("resumed" if s.resume(tid) else "not resumed"))
+        return 0
+    print("unknown action")
+    return 1
+
+
+# -- workers / providers -------------------------------------------------------
+def cmd_workers(_args):
+    from elysia.core.scheduler import WorkerRegistry
+    wr = WorkerRegistry()
+    print("workers (in-memory registry, see run/pid for live ones):")
+    for w in wr.list():
+        print(" ", w)
+    return 0
+
+
+def cmd_providers(args):
+    cfg = load_config()
+    from elysia.core.providers import ProviderManager
+    pm = ProviderManager()
+    pm.register_many(cfg.providers)
+    for p in pm.list():
+        cp = p.capacity()
+        print(f"{cp['name']:20} status={cp['status']:12} "
+              f"concurrency={cp['current_concurrency']}/{cp['max_concurrency']} "
+              f"requests={cp['requests']} failures={cp['failures']} "
+              f"avg_lat={cp['avg_latency_s']}s")
+        if cp["last_error"]:
+            print(f"   last_error: {cp['last_error'][:100]}")
+    total = pm.usage_totals()
+    print("\nestimated totals:", json.dumps(total, indent=1))
+    return 0
+
+
+def cmd_cost(_args):
+    from elysia.core.telemetry import CostTracker
+    ct = CostTracker()
+    print(json.dumps({"grand_total": ct.grand_total(),
+                      "by_provider_model": ct.totals()}, indent=1))
+    return 0
+
+
+def cmd_resources(_args):
+    from elysia.core.resources import ResourceManager
+    rm = ResourceManager()
+    print(json.dumps(rm.report(), indent=1))
+    return 0
+
+
+# -- agents -------------------------------------------------------------------
+def cmd_agents(args):
+    from elysia.core.agents import ROLES
+    if args.role:
+        if args.role not in ROLES:
+            print("unknown role", args.role)
+            return 1
+        cfg = load_config()
+        from elysia.core.providers import ProviderManager
+        from elysia.core.tasks import TaskStore
+        from elysia.core.agents import AgentPipeline
+        pm = ProviderManager()
+        pm.register_many(cfg.providers)
+        store = TaskStore(os.path.join(_root(), "orchestrator", "taskboard.sqlite"))
+        pipe = AgentPipeline(pm, store, cfg=cfg)
+        fn = getattr(pipe, {"planner": "plan_task",
+                            "architect": "architect"}.get(args.role,
+                                                          "plan_task"), None)
+        goal = args.prompt or "Describe the current repository structure."
+        if args.role == "planner":
+            from elysia.core.project import ProjectIntel
+            intel = ProjectIntel(_root())
+            res = pipe.plan_task(goal, intel.to_context())
+        else:
+            res = pipe.architect(goal)
+        print(json.dumps(res, indent=1, default=str)[:4000])
+        return 0 if res.get("ok") else 1
+    print("available agent roles:")
+    for r in ROLES:
+        print(f"  {r}")
+    return 0
+
+
+# -- research -------------------------------------------------------------------
+def cmd_research(args):
+    cfg = load_config()
+    from elysia.core.providers import ProviderManager
+    from elysia.core.research import ResearchEngine, build_search
+    from elysia.core.memory import Memory
+    pm = ProviderManager()
+    pm.register_many(cfg.providers)
+    eng = ResearchEngine(pm, memory=Memory(os.path.join(_root(), "state", "memory"),
+                                           max_entries=cfg.memory.max_entries),
+                         search=build_search(cfg),
+                         max_sources=cfg.research.max_sources,
+                         output_dir=os.path.join(_root(), "workspace"))
+    if getattr(args, "deep", False):
+        res = eng.run_deep(args.query, format_spec=args.format or "",
+                           breadth=args.breadth, depth=args.depth)
+    else:
+        res = eng.run(args.query, format_spec=args.format or "")
+    print(res["report"][:6000])
+    if res.get("report_path"):
+        print("\n[report saved]", res["report_path"])
+    print("\n[sources]", len(res["sources"]))
+    return 0
+
+
+# -- openreacher (deep research alias) ------------------------------------------
+def cmd_orx(args):
+    args.deep = True
+    return cmd_research(args)
+
+
+# -- templates ------------------------------------------------------------------
+def cmd_template(args):
+    from elysia.core.templates import TEMPLATES, list_templates
+    if args.name not in TEMPLATES:
+        print("known templates:")
+        for t in list_templates():
+            print(f"  {t['name']:<14} {t['description']}")
+        return 1
+    print(json.dumps(TEMPLATES[args.name], indent=1))
+    return 0
+
+
+# -- git -------------------------------------------------------------------------
+def cmd_checkpoint(args):
+    from elysia.core.git import safe_checkpoint
+    ok, msg = safe_checkpoint(_root(), args.message,
+                              # never snapshot runtime state
+                              never_commit=[".env", "*.key", "*.pem", "*.p12",
+                                            "*.sqlite", "*.db", "*.log",
+                                            "*.gguf", "*.onnx", "*.jar",
+                                            "pool.lock", "pids", "state"])
+    print(msg if ok else f"checkpoint failed: {msg}")
+    return 0 if ok else 1
+
+
+def cmd_checkpoints(args):
+    from elysia.core.git import checkpoint_list
+    for c in checkpoint_list(_root(), limit=args.n or 10):
+        print(f"{c['sha']} {c['message'][:80]}")
+    return 0
+
+
+def cmd_rollback(args):
+    from elysia.core.git import rollback_checkpoint
+    ok, msg = rollback_checkpoint(_root(), args.sha, hard=args.hard)
+    print(msg)
+    return 0 if ok else 1
+
+
+def cmd_since(_args):
+    from elysia.core.git import since_last_checkpoint
+    lines = since_last_checkpoint(_root())
+    print("\n".join(lines) if lines else "(no changes since last commit)")
+    return 0
+
+
+# -- skills -----------------------------------------------------------------------
+def cmd_skills(args):
+    from elysia.core.skills import discover_skills, curated_allow_list, load_skill
+    skill_root = args.path or os.path.join(_root(), "elysia", "skills")
+    if args.command == "list":
+        for s in discover_skills(skill_root):
+            flag = "" if s.risk == "safe" else f"  <risk={s.risk}>"
+            print(f"{s.name:32} {s.description[:60]}{flag}")
+        return 0
+    if args.command == "import":
+        from scripts.import_skills import import_selected
+        import_selected(args.path)
+        return 0
+    if args.command == "allow":
+        print(", ".join(curated_allow_list()))
+        return 0
+    return 1
+
+
+# -- memory / plugins ---------------------------------------------------------------
+def cmd_memory(args):
+    from elysia.core.memory import Memory
+    m = Memory(os.path.join(_root(), "state", "memory"))
+    hits = m.search(args.query, limit=10)
+    for h in hits:
+        print(f"[{h['namespace']}] {h['key']}  (score {h['score']})")
+        print(f"    {json.dumps(h['value'], default=str)[:200]}")
+    return 0
+
+
+def cmd_plugins(args):
+    cfg = load_config()
+    from elysia.core.plugins import PluginManager
+    from elysia.core.tools import ToolRegistry
+    pm = PluginManager(cfg.plugins.dir, allow_list=cfg.plugins.enabled)
+    if args.command == "list":
+        for p in pm.discover():
+            print(f"{p.name:24} enabled={str(p.enabled):5} loaded={str(p.loaded):5}"
+                  f"  {p.description[:50]}")
+            if p.error:
+                print(f"   error: {p.error[:100]}")
+        return 0
+    if args.command == "load":
+        tools = ToolRegistry()
+        p = pm.load(args.name, tools)
+        print(f"loaded {p.name}: errors={p.error or 'none'}")
+        return 0 if p.loaded else 1
+    return 1
+
+
+# -- audit / test / logs ----------------------------------------------------------------
+def cmd_audit(args):
+    """Scan executable/source files (not prose docs) for hardcoded paths to a
+    deleted absolute tree (used only to keep the checker literal-free)."""
+    HARD_CODE = "/data" + "/elysia"
+    HARD_CODE_U = "/data" + "/Elysia"
+    SKIP_DIRS = {".git", "node_modules", "__pycache__", "legacy", ".venv",
+                 "venv", "dist", "build", ".agent_tmp"}
+    PROSE_EXT = {".md", ".rst", ".adoc", ".readme", ".txt", "AGENTS"}
+    CODE_EXT = {".py", ".sh", ".go", ".json", ".toml", ".cfg", ".yml", ".yaml",
+                ".ts", ".tsx", ".js", ".jsx", ".rs", ".java", ".kt", ".rb",
+                ".sql", ".ini", ".env.example"}
+    COMMENT_LINE = "#"
+    bad = []
+    for dp, dns, fns in os.walk(_root()):
+        dns[:] = [d for d in dns if d not in SKIP_DIRS]
+        for f in fns:
+            low = f.lower()
+            if low.endswith(tuple(PROSE_EXT)):
+                continue
+            if not low.endswith(tuple(CODE_EXT)):
+                continue
+            p = os.path.join(dp, f)
+            try:
+                lines = open(p, "rb").read().splitlines()
+            except OSError:
+                continue
+            if low.endswith(".sh"):
+                lines = [l for l in lines if not l.lstrip().startswith(b"#")]
+            blob = b"\n".join(lines)
+            if HARD_CODE.encode() in blob or HARD_CODE_U.encode() in blob:
+                bad.append(os.path.relpath(p, _root()))
+    if bad:
+        print("hardcoded absolute-legacy-path refs remain in source files:")
+        for b in bad:
+            print("  ", b)
+        return 1
+    print(f"audit passed: no hardcoded legacy absolute paths in source files "
+          f"under {_root()} (legacy excluded)")
+    return 0
+
+
+def cmd_test(args):
+    tests_dir = os.path.join(_root(), "tests")
+    if args.mode == "unit":
+        r = subprocess.run([sys.executable, "-m", "unittest", "discover",
+                            "-s", tests_dir], cwd=_root())
+        return r.returncode
+    if args.mode == "chaos":
+        r = subprocess.run([sys.executable, "tests/test_chaos.py"], cwd=_root())
+        return r.returncode
+    if args.mode == "e2e":
+        r = subprocess.run([sys.executable, "tests/test_e2e.py"], cwd=_root())
+        return r.returncode
+    return 1
+
+
+def cmd_logs(args):
+    cfg = load_config()
+    log_dir = cfg.logging.dir
+    events_file = os.path.join(log_dir, cfg.logging.events_file)
+    if not os.path.exists(events_file):
+        print("no events journal yet:", events_file)
+        return 0
+    lines = open(events_file).read().splitlines()
+    for line in lines[- (args.n or 50):]:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        print(f"{ev.get('ts'):20.2f} {ev.get('event_type'):20} "
+              f"{ev.get('status','')} {ev.get('detail','')[:120]}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="elysia", description="Elysia CLI")
+    sub = p.add_subparsers(dest="cmd")
+    sub.add_parser("start").add_argument("--port", type=int, default=None)
+    sub.add_parser("stop")
+    sub.add_parser("status")
+    sub.add_parser("doctor")
+    sub.add_parser("cost")
+    sub.add_parser("resources")
+    sub.add_parser("workers")
+
+    tp = sub.add_parser("tasks")
+    tp.add_argument("filter", nargs="?", default=None)
+    tp.set_defaults(action="list")
+
+    task = sub.add_parser("task")
+    task.add_argument("action", choices=["show", "add", "cancel", "retry",
+                                         "pause", "resume"])
+    task.add_argument("task_id", nargs="?")
+    task.add_argument("--title")
+    task.add_argument("--files", default="")
+    task.add_argument("--priority", type=int, default=5)
+    task.add_argument("--deps", default="")
+    task.add_argument("--template")
+    task.add_argument("--dedup", action="store_true")
+
+    sub.add_parser("providers")
+    ag = sub.add_parser("agents")
+    ag.add_argument("role", nargs="?", default=None)
+    ag.add_argument("--prompt", default=None)
+
+    rs = sub.add_parser("research")
+    rs.add_argument("query")
+    rs.add_argument("--format", default="")
+    rs.add_argument("--deep", action="store_true",
+                    help="breadth/depth research (openreacher-style)")
+    rs.add_argument("--breadth", type=int, default=2)
+    rs.add_argument("--depth", type=int, default=1)
+
+    orx = sub.add_parser(
+        "orx", help="openreacher deep research (alias for research --deep)")
+    orx.add_argument("query")
+    orx.add_argument("--format", default="")
+    orx.add_argument("--breadth", type=int, default=2)
+    orx.add_argument("--depth", type=int, default=1)
+
+    tmpl = sub.add_parser("template")
+    tmpl.add_argument("name", nargs="?")
+
+    cp = sub.add_parser("checkpoint")
+    cp.add_argument("message")
+    sub.add_parser("checkpoints").add_argument("n", nargs="?",
+                                               type=int, default=None)
+    rb = sub.add_parser("rollback")
+    rb.add_argument("sha")
+    rb.add_argument("--hard", action="store_true")
+    sub.add_parser("since-checkpoint")
+
+    sk = sub.add_parser("skills")
+    sk.add_argument("command", choices=["list", "import", "allow"])
+    sk.add_argument("path", nargs="?")
+
+    mem = sub.add_parser("memory")
+    mem.add_argument("search", nargs="?")
+    mem.add_argument("query", nargs="?")
+
+    pl = sub.add_parser("plugins")
+    pl.add_argument("command", choices=["list", "load"])
+    pl.add_argument("name", nargs="?")
+
+    sub.add_parser("audit")
+    te = sub.add_parser("test")
+    te.add_argument("mode", choices=["unit", "chaos", "e2e"], default="unit",
+                    nargs="?")
+    lg = sub.add_parser("logs")
+    lg.add_argument("n", nargs="?", type=int, default=None)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    cmd = args.cmd
+    if not cmd:
+        print(build_parser().format_help())
+        return 0
+    handlers = {
+        "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
+        "doctor": cmd_doctor, "tasks": cmd_tasks, "task": cmd_task,
+        "workers": cmd_workers, "providers": cmd_providers,
+        "cost": cmd_cost, "resources": cmd_resources, "agents": cmd_agents,
+        "research": cmd_research, "orx": cmd_orx, "template": cmd_template,
+        "checkpoint": cmd_checkpoint, "checkpoints": cmd_checkpoints,
+        "rollback": cmd_rollback, "since-checkpoint": cmd_since,
+        "skills": cmd_skills, "memory": cmd_memory, "plugins": cmd_plugins,
+        "audit": cmd_audit, "test": cmd_test, "logs": cmd_logs,
+    }
+    return handlers[cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

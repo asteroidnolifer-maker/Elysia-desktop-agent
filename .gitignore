@@ -59,6 +59,12 @@ temp/
 
 # === Elysia runtime state (regenerated on use) ===
 orchestrator/.adaptive/
+state/
+**/state/
+workspace/reports/
+*.events.jsonl
+*pids
+pool.pids
 orchestrator/.monitor/
 orchestrator/taskboard.sqlite*
 **/agent_audit.json

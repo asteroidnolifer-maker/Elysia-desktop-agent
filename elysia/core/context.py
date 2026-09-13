@@ -57,6 +57,8 @@ class ContextBuilder:
     def get(self, layer: str) -> str:
         return self.layers.get(layer, "")
 
+    MIN_TAIL = 120  # smallest useful trimmed slice
+
     def to_prompt(self) -> str:
         """Assemble layers, trimming to fit budget (protected layers kept)."""
         parts = []
@@ -70,12 +72,13 @@ class ContextBuilder:
                 used += len(text)
                 continue
             if used + len(text) > self.budget:
-                # trim this mutable layer to the remaining budget
                 remaining = max(0, self.budget - used)
-                if remaining > 400:
+                if remaining >= self.MIN_TAIL:
                     text = text[:remaining - 3] + "..."
                     parts.append(text)
                     used += len(text)
+                    break
+                # not enough room for a useful slice — drop this and later layers
                 break
             parts.append(text)
             used += len(text)

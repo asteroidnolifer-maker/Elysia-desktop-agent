@@ -50,19 +50,99 @@ def has_conflicts(root: str) -> list[str]:
     return [l for l in out.splitlines() if l]
 
 
-def safe_checkpoint(root: str, message: str) -> tuple[bool, str]:
+def safe_checkpoint(root: str, message: str, paths=None,
+                    never_commit=None) -> tuple[bool, str]:
     """Create a checkpoint commit without touching unrelated files.
 
-    Only files matching the working set of the task (none here) would be
-    staged; we deliberately DON'T add everything — callers pass explicit paths.
+    ``paths`` (optional) restricts staging to explicit paths; when None, only
+    tracked changes are staged via ``git add -u`` plus untracked files that are
+    NOT in never_commit. Never runs ``git add .``.
     """
     if not is_repo(root):
         return False, "not a git repo"
     conflicts = has_conflicts(root)
     if conflicts:
         return False, "unresolved merge conflicts: " + ", ".join(conflicts)
-    # Refuse to commit without explicit paths (never `git add .`).
-    return True, "checkpoint requires explicit paths (not invoked)"
+    never = set(never_commit or NEVER_COMMIT)
+    if paths:
+        for p in paths:
+            rc, err = git(root, "add", "--", p)
+            if rc != 0:
+                return False, f"git add {p}: {err}"
+    else:
+        rc, out = git(root, "add", "-u")  # tracked changes only
+        if rc != 0:
+            return False, f"git add -u: {out}"
+        # add untracked files that pass the never_commit filter
+        rc, out = git(root, "ls-files", "--others", "--exclude-standard")
+        if rc == 0:
+            for rel in out.splitlines():
+                if _matches_never(rel, never):
+                    continue
+                rc2, err2 = git(root, "add", "--", rel)
+                if rc2 != 0:
+                    return False, f"git add {rel}: {err2}"
+    rc, out = git(root, "diff", "--cached", "--quiet")
+    if rc == 0:
+        return False, "nothing to checkpoint"
+    clean_msg = redact(message)[:200]
+    rc, out = git(root, "commit", "-m", clean_msg)
+    if rc != 0:
+        return False, f"git commit: {out}"
+    return True, out
+
+
+def _matches_never(rel: str, never: set[str]) -> bool:
+    import fnmatch
+    base = os.path.basename(rel)
+    for pat in never:
+        if fnmatch.fnmatch(rel, pat) or (pat.startswith("*")
+                                         and fnmatch.fnmatch(base, pat)):
+            return True
+    return False
+
+
+def checkpoint_list(root: str, limit: int = 10, prefix: str = "") -> list[dict]:
+    rc, out = git(root, "log", "--oneline", "-n", str(limit))
+    if rc != 0:
+        return []
+    commits = []
+    for line in out.splitlines():
+        sha, _, rest = line.partition(" ")
+        commits.append({"sha": sha, "message": rest})
+    return commits
+
+
+def since_last_checkpoint(root: str, branch: str = "") -> list[str]:
+    rc, out = git(root, "diff", "--name-status", "HEAD~1", "HEAD", "--")
+    if rc != 0:
+        return []
+    return [l for l in out.splitlines() if l]
+
+
+def last_checkpoint(root: str, prefix: str = "") -> dict | None:
+    rc, out = git(root, "log", "-1", "--oneline")
+    if rc != 0 or not out:
+        return None
+    sha, _, rest = out.partition(" ")
+    return {"sha": sha, "message": rest}
+
+
+def rollback_checkpoint(root: str, sha: str, hard: bool = False) -> tuple[bool, str]:
+    """Reset working tree/commits to a checkpoint. Only ``hard=False`` by
+    default (preserves working files, resets the index to the checkpoint)."""
+    if not is_repo(root):
+        return False, "not a git repo"
+    flag = "--hard" if hard else "--soft"
+    rc, out = git(root, "reset", flag, sha)
+    if rc != 0:
+        return False, f"reset: {out}"
+    if not hard:
+        # keep uncommitted changes, only move HEAD back
+        rc2, out2 = git(root, "reset", "HEAD", "--")
+        if rc2 == 0:
+            return True, "index reset to " + sha
+    return True, "hard reset to " + sha
 
 # ---------------------------------------------------------------------------
 # Secret redaction helper (shared by logs / responses / commits)

@@ -60,7 +60,7 @@ class AgentPipeline:
 
     # -- provider selection with fallback ------------------------------------
     def _execute(self, messages, capabilities, task_id=None):
-        self.events.emit("provider.selected", event_type="provider", status="ok",
+        self.events.emit("provider.selected", status="ok",
                          agent_id=self.correlation.agent_role, task_id=task_id)
         text, err = self.providers.execute(messages, capabilities=capabilities,
                                            preferred=None)
@@ -97,13 +97,13 @@ class AgentPipeline:
                 "'- <short title>| <detail>'. Do NOT include commentary."},
             {"role": "user", "content": ctx},
         ]
-        self.events.emit("agent.run", event_type="agent", agent_id="planner",
+        self.events.emit("agent.run", agent_id="planner",
                          status="started")
         text, err = self._execute(messages, self._role_caps("planner"))
         if err:
             return {"ok": False, "error": err}
         tasks = parse_plan(text)
-        self.events.emit("agent.decision", event_type="agent", agent_id="planner",
+        self.events.emit("agent.decision", agent_id="planner",
                          status="ok", detail=f"planned {len(tasks)} sub-tasks")
         return {"ok": True, "tasks": tasks, "raw": text}
 
@@ -116,7 +116,7 @@ class AgentPipeline:
                        "risks. Return markdown sections: '## Modules', "
                        "'## Risks'.",
         }, {"role": "user", "content": plan or "No plan supplied"}]
-        self.events.emit("agent.run", event_type="agent", agent_id="architect",
+        self.events.emit("agent.run", agent_id="architect",
                          status="started")
         text, err = self._execute(messages, self._role_caps("architect"),
                                   task_id=task_id)
@@ -132,7 +132,7 @@ class AgentPipeline:
             "content": f"You are the Elysia implementer. Implement the task. "
                        f"You may only position under files: {owned_files or ['(any new)']}",
         }, {"role": "user", "content": spec}]
-        self.events.emit("agent.run", event_type="agent", agent_id="implementer",
+        self.events.emit("agent.run", agent_id="implementer",
                          status="started")
         text, err = self._execute(messages, self._role_caps("implementer"),
                                   task_id=task_id)
@@ -149,7 +149,7 @@ class AgentPipeline:
                        "commands and what a green result looks like for this "
                        "task.",
         }, {"role": "user", "content": spec}]
-        self.events.emit("agent.run", event_type="agent", agent_id="tester",
+        self.events.emit("agent.run", agent_id="tester",
                          status="started")
         text, err = self._execute(messages, self._role_caps("tester"),
                                   task_id=task_id)
@@ -166,7 +166,7 @@ class AgentPipeline:
                        "format: 'SEVERITY: path:line: note', where severity is "
                        "BLOCKER/MAJOR/MINOR/NIT.",
         }, {"role": "user", "content": diff or "No diff provided"}]
-        self.events.emit("agent.run", event_type="agent", agent_id="code_reviewer",
+        self.events.emit("agent.run", agent_id="code_reviewer",
                          status="started")
         text, err = self._execute(messages, self._role_caps("code_reviewer"),
                                   task_id=task_id)
@@ -181,7 +181,7 @@ class AgentPipeline:
             "content": "You are the Elysia documentation agent. Write concise, "
                        "accurate docs for the given change.",
         }, {"role": "user", "content": spec}]
-        self.events.emit("agent.run", event_type="agent", agent_id="documentation_agent",
+        self.events.emit("agent.run", agent_id="documentation_agent",
                          status="started")
         text, err = self._execute(messages, self._role_caps("documentation_agent"),
                                   task_id=task_id)

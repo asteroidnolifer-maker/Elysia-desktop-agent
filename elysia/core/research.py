@@ -81,10 +81,14 @@ class TavilySearch(SearchProvider):
 
 
 class OfflineSearch(SearchProvider):
-    """Deterministic no-net search for tests/offline: matches a tiny local corpus."""
+    """Deterministic no-net search for tests/offline: matches a tiny local corpus.
+
+    Word-based: a document matches when a majority of the query's meaningful
+    words (>=4 chars) appear in its title+snippet.
+    """
 
     def __init__(self, corpus: list[dict] | None = None):
-        self.corpus = corpus or [
+        self.corpus = corpus if corpus is not None else [
             {"url": "elysia://docs/architecture", "title": "Elysia architecture",
              "snippet": "Elysia core modules: tasks, scheduler, providers, tools "
                         "and workspace."},
@@ -94,9 +98,16 @@ class OfflineSearch(SearchProvider):
         ]
 
     def search(self, query, k=5):
-        q = query.lower()
-        hits = [c for c in self.corpus if q in
-                (c["title"] + " " + c["snippet"]).lower()]
+        import re as _re
+        words = [w for w in _re.findall(r"[A-Za-z0-9]{4,}", query.lower())]
+        if not words:
+            return []
+        hits = []
+        for c in self.corpus:
+            hay = (c["title"] + " " + c["snippet"]).lower()
+            matched = sum(1 for w in set(words) if w in hay)
+            if matched >= max(1, len(set(words)) // 2):
+                hits.append(c)
         return hits[:k]
 
 
@@ -162,6 +173,109 @@ class ResearchEngine:
                 "first_sources": [s["url"] for s in list(sources.values())[:3]]})
         return result
 
+    # ------------------------------------------------------------------ deep --
+    def run_deep(self, query: str, format_spec: str = "", task_id=None,
+                 correlation_id=None, breadth: int = 2, depth: int = 1) -> dict:
+        """Bounded breadth/depth deep research (openreacher-style).
+
+        Refines the research direction across up to `depth` levels, each
+        expanding into up to `breadth` queries, with a hard cap on total
+        queries and total sources. When the provider is unavailable it
+        degrades to the single-pass plan -> search path (never fails).
+        """
+        breadth = max(1, min(breadth, 4))
+        depth = max(1, min(depth, 3))
+        start = time.time()
+        sources: dict[str, dict] = {}
+        seen: set[str] = set()
+        stats = {"queries": 0, "depth_reached": 1}
+        MAX_QUERIES = 40
+
+        def _search_round(q: str) -> None:
+            if len(sources) >= self.max_sources:
+                return
+            self.events.emit("research.query", agent_id="research_agent",
+                             task_id=task_id, status="ok", detail=q)
+            for r in self.search.search(q, k=self.max_sources):
+                url = r.get("url", "")
+                if url and url not in sources:
+                    sources[url] = {
+                        "url": url, "title": r.get("title", ""),
+                        "snippet": r.get("snippet", ""), "query": q}
+                    self.events.emit("research.source", agent_id="research_agent",
+                                     task_id=task_id, status="ok", detail=url)
+
+        def _explore(q: str, level: int) -> None:
+            stats["depth_reached"] = max(stats["depth_reached"], level)
+            if level > depth or stats["queries"] >= MAX_QUERIES:
+                return
+            subs = self._plan_queries(q) if level == 0 else \
+                self._refine_queries(sources)
+            if not subs:
+                subs = [q]
+            for sub in subs[:breadth]:
+                if stats["queries"] >= MAX_QUERIES:
+                    return
+                if sub in seen:
+                    continue
+                seen.add(sub)
+                stats["queries"] += 1
+                _search_round(sub)
+                if level < depth and len(sources) < self.max_sources \
+                        and stats["queries"] < MAX_QUERIES:
+                    _explore(sub, level + 1)
+
+        _explore(query, 0)
+        sources = dict(list(sources.items())[: self.max_sources])
+        report = self._synthesize(query, list(sources.values()), format_spec,
+                                  task_id)
+        cost = time.time() - start
+        self.events.emit("research.complete", agent_id="research_agent",
+                         task_id=task_id, status="ok", depth=stats["depth_reached"],
+                         duration_s=round(cost, 2))
+        result = {
+            "query": query,
+            "queries": list(seen),
+            "sources": list(sources.values()),
+            "report": report,
+            "format": format_spec or "default",
+            "depth": stats["depth_reached"],
+            "duration_s": round(cost, 2),
+            "generated_at": time.time(),
+        }
+        if self.output_dir:
+            os.makedirs(os.path.join(self.output_dir, "reports"), exist_ok=True)
+            fname = re.sub(r"[^A-Za-z0-9]+", "_", query)[:60] or "research"
+            path = os.path.join(self.output_dir, "reports",
+                                fname + ".deep.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(report)
+            result["report_path"] = path
+        if self.memory is not None:
+            self.memory.record_project_note("research", {
+                "query": query, "deep": True, "sources": len(sources),
+                "depth": stats["depth_reached"]})
+        return result
+
+    def _refine_queries(self, sources: dict[str, dict], max_q: int = 2) -> list[str]:
+        """Ask the model for follow-up queries given sources learned so far."""
+        snippet_block = "\n".join(
+            f"- [{s['title'][:120]}]({s['url']}): {s['snippet'][:280]}"
+            for s in sources.values())
+        system = ("You are a research planner. Based on the sources gathered so "
+                  "far, return ONLY 1-2 follow-up search queries (one per line) "
+                  "that would deepen the investigation of the most promising "
+                  "unanswered angle. No bullets, no explanations.")
+        user = f"Sources so far:\n{snippet_block or '(none)'}\n\nFollow-up queries:"
+        text, err = self.exec_provider.execute(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            capabilities=["chat", "reasoning"], max_tokens=120)
+        if err or not text:
+            return []
+        return [line.strip().strip("-") for line in text.splitlines()
+                if line.strip() and len(line.strip()) >= 6][:max_q]
+
     def _plan_queries(self, query: str) -> list[str]:
         text, err = self.exec_provider.execute(
             [{"role": "system", "content": "Break the research question into 2-4 "
@@ -193,7 +307,7 @@ class ResearchEngine:
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             capabilities=["chat", "reasoning"],
-            max_tokens=1600, task_id=task_id)
+            max_tokens=1600)
         if err or not text:
             text = self._fallback_report(query, sources)
         return text or f"# {query}\n\n(empty report)"

@@ -84,15 +84,15 @@ def check_git_repo(root: str) -> tuple[bool, list[str]]:
     return True, []
 
 
-def run_all(cfg=None, workspace_root: str = "") -> list[dict]:
-    from .config import load_config
+def run_all(cfg=None, workspace_root: str = "", repo_root: str = "") -> list[dict]:
+    from .config import load_config, repo_root as cfg_repo_root
     cfg = cfg or load_config()
     checks = [
         ("workspace", check_workspace_secure(workspace_root or cfg.workspace.root)),
         ("providers", check_providers(cfg)),
         ("api_port", check_api_port(cfg.api.host, cfg.api.port)),
         ("python_deps", check_python_deps()),
-        ("git", check_git_repo(workspace_root or cfg.workspace.root)),
+        ("git", check_git_repo(repo_root or cfg_repo_root())),
     ]
     return [{"name": name, "ok": ok, "problems": problems}
             for name, (ok, problems) in checks]

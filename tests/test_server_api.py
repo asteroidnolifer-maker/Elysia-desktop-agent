@@ -82,6 +82,23 @@ class ServerTestCase(unittest.TestCase):
         names = [p["name"] for p in provs["providers"]]
         self.assertEqual(names, ["local"])
 
+    def test_api_agent_short_task_rejected(self):
+        # /api/agent no longer imports the legacy elysia_agent module; a
+        # too-short task must be rejected cleanly with a 400, never a 500.
+        h = self._handler()
+        sent = {}
+        h._send = lambda code, payload, ctype="application/json": \
+            sent.update(code=code, payload=payload)
+        h._api_agent({"task": "ae"})
+        self.assertEqual(sent["code"], 400)
+
+    def test_api_agent_too_long_rejected(self):
+        # server_api bounds the goal length before any provider contact.
+        from elysia.core import server_api as sapi
+        r = sapi.run_agent("z" * (sapi.MAX_GOAL_CHARS + 1), timeout_s=5)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["status"], "error")
+
 
 if __name__ == "__main__":
     unittest.main()

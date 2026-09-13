@@ -833,35 +833,17 @@ class Handler(BaseHTTPRequestHandler):
                                     "reply": f"Goal split into {len(added)} "
                                               f"task(s) and queued — agents "
                                               f"({pool_msg})."})
-        if intent == "elysia":
-            try:
-                sys.path.insert(0, os.path.join(WS_DIR, "tools"))
-                from elysia_agent import process_request
-                import threading
-                result_holder = [None]
-                def run_agent():
-                    result_holder[0] = process_request(message)
-                t = threading.Thread(target=run_agent, daemon=True)
-                t.start()
-                t.join(timeout=90)
-                if result_holder[0]:
-                    r = result_holder[0]
-                    reply = f"Agent completed task #{r.get('task_id', '?')} ({r.get('type', 'unknown')})\n"
-                    for step, res in r.get("results", {}).items():
-                        if isinstance(res, dict) and "error" not in res:
-                            reply += f"  ✓ {step}\n"
-                        else:
-                            reply += f"  ✗ {step}: {str(res)[:80]}\n"
-                    return self._send(200, {"ok": True, "type": "text",
-                                            "intent": "elysia", "reply": reply})
-                else:
-                    return self._send(200, {"ok": True, "type": "text",
-                                            "intent": "elysia",
-                                            "reply": "Agent started working on your request. Check the task board for progress."})
-            except Exception as e:
-                return self._send(200, {"ok": True, "type": "text",
-                                        "intent": "elysia",
-                                        "reply": f"Agent error: {str(e)[:200]}"})
+        if intent in ("elysia", "research"):
+            from elysia.core import server_api
+            if intent == "research" or message.lower().startswith(
+                    ("research ", "deep research", "investigate", "find out about")):
+                res = server_api.deep_research(message)
+            else:
+                res = server_api.run_chat(message)
+            return self._send(200, {"ok": True, "type": "text",
+                                    "intent": intent,
+                                    "reply": res.get("reply", ""),
+                                    "status": res.get("status", "done")})
         # general question -> local model
         reply = general_chat(message, history)
         return self._send(200, {"ok": True, "type": "text",
@@ -869,28 +851,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
     def _api_agent(self, body):
-        """Elysia master agent endpoint - executes any task."""
+        """Elysia master agent endpoint - runs a goal through the core engine."""
         task = str(body.get("task") or body.get("message") or "").strip()
         if len(task) < 3:
             return self._send(400, {"ok": False, "error": "task too short"})
         log(f"/api/agent task: {task[:120]}")
         try:
-            sys.path.insert(0, os.path.join(WS_DIR, "tools"))
-            from elysia_agent import process_request
-            import threading
-            result_holder = [None]
-            def run_agent():
-                result_holder[0] = process_request(task)
-            t = threading.Thread(target=run_agent, daemon=True)
-            t.start()
-            t.join(timeout=120)
-            if result_holder[0] is None:
-                return self._send(200, {"ok": True, "status": "running",
-                                        "reply": f"Agent started on: {task}. Check back for results."})
-            return self._send(200, {"ok": True, "status": "done",
-                                    "result": result_holder[0]})
+            from elysia.core import server_api
+            res = server_api.run_agent(task, timeout_s=20)
+            return self._send(200, {"ok": True, "status": res.get("status", "done"),
+                                    "reply": res.get("reply", ""),
+                                    "result": res.get("detail")})
         except Exception as e:
-            return self._send(500, {"ok": False, "error": str(e)})
+            EVENTS.emit("agent_error", status="error", error=str(e)[:200])
+            return self._send(200, {"ok": False, "status": "error",
+                                    "reply": f"Agent error: {str(e)[:200]}"})
 
 
 def main():
