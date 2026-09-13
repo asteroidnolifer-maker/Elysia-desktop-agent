@@ -1,0 +1,15 @@
+{
+  "score": 55.4,
+  "strength": "neutral",
+  "roc_1m": 0.71,
+  "roc_3m": 7.13,
+  "roc_6m": -1.57,
+  "roc_12m": -1.57,
+  "ma_score": 25,
+  "range_position": 39.5,
+  "above_sma20": false,
+  "above_sma50": false,
+  "sma20_above_sma50": true,
+  "near_52w_high": false,
+  "near_52w_low": false
+}

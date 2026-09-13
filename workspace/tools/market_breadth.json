@@ -1,0 +1,17 @@
+{
+  "breadth": {
+    "advancing": 2800,
+    "declining": 2100,
+    "unchanged": 150,
+    "total": 5050,
+    "ad_ratio": 1.33,
+    "ad_line": 700,
+    "ad_percentage": 55.4,
+    "breadth": "bullish",
+    "new_highs_lows": "mixed"
+  },
+  "trin": {
+    "trin": 1.2,
+    "signal": "neutral"
+  }
+}

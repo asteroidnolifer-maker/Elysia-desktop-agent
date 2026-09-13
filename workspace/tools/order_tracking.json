@@ -1,0 +1,122 @@
+{
+  "orders": [
+    {
+      "order_id": "ORD-570061",
+      "carrier": "FedEx",
+      "tracking_number": "Fe325931520",
+      "status": "out_for_delivery",
+      "origin": "Shenzhen, China",
+      "destination": "New York, NY",
+      "estimated_delivery": "2026-10-01",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 11
+    },
+    {
+      "order_id": "ORD-601546",
+      "carrier": "USPS",
+      "tracking_number": "US558289013",
+      "status": "shipped",
+      "origin": "Shenzhen, China",
+      "destination": "Los Angeles, CA",
+      "estimated_delivery": "2026-09-21",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 9
+    },
+    {
+      "order_id": "ORD-816399",
+      "carrier": "ePacket",
+      "tracking_number": "eP688990114",
+      "status": "out_for_delivery",
+      "origin": "Shenzhen, China",
+      "destination": "Los Angeles, CA",
+      "estimated_delivery": "2026-09-29",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 12
+    },
+    {
+      "order_id": "ORD-118178",
+      "carrier": "ePacket",
+      "tracking_number": "eP713997962",
+      "status": "delivered",
+      "origin": "Shenzhen, China",
+      "destination": "New York, NY",
+      "estimated_delivery": "2026-09-21",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 26
+    },
+    {
+      "order_id": "ORD-618939",
+      "carrier": "ePacket",
+      "tracking_number": "eP243264373",
+      "status": "delivered",
+      "origin": "Yiwu, China",
+      "destination": "Los Angeles, CA",
+      "estimated_delivery": "2026-10-06",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 13
+    },
+    {
+      "order_id": "ORD-272721",
+      "carrier": "USPS",
+      "tracking_number": "US277468760",
+      "status": "shipped",
+      "origin": "Shenzhen, China",
+      "destination": "Chicago, IL",
+      "estimated_delivery": "2026-09-22",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 24
+    },
+    {
+      "order_id": "ORD-783028",
+      "carrier": "FedEx",
+      "tracking_number": "Fe975932984",
+      "status": "out_for_delivery",
+      "origin": "Shenzhen, China",
+      "destination": "Chicago, IL",
+      "estimated_delivery": "2026-09-24",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 23
+    },
+    {
+      "order_id": "ORD-381234",
+      "carrier": "ePacket",
+      "tracking_number": "eP399994565",
+      "status": "exception",
+      "origin": "Yiwu, China",
+      "destination": "Chicago, IL",
+      "estimated_delivery": "2026-09-22",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 3
+    },
+    {
+      "order_id": "ORD-739791",
+      "carrier": "FedEx",
+      "tracking_number": "Fe692222126",
+      "status": "delivered",
+      "origin": "Guangzhou, China",
+      "destination": "Chicago, IL",
+      "estimated_delivery": "2026-10-09",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 10
+    },
+    {
+      "order_id": "ORD-599806",
+      "carrier": "FedEx",
+      "tracking_number": "Fe289714744",
+      "status": "in_transit",
+      "origin": "Shenzhen, China",
+      "destination": "Chicago, IL",
+      "estimated_delivery": "2026-09-28",
+      "last_update": "2026-09-12 16:07",
+      "days_in_transit": 18
+    }
+  ],
+  "summary": {
+    "out_for_delivery": 3,
+    "shipped": 2,
+    "delivered": 3,
+    "exception": 1,
+    "in_transit": 1
+  },
+  "total": 10
+}

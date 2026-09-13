@@ -1,0 +1,155 @@
+{
+  "task_id": 19,
+  "type": "meme",
+  "results": {
+    "meme_schedule": {
+      "count": 30,
+      "factory": {
+        "status": "skipped",
+        "have": 30
+      },
+      "uploader": "detached (see workspace/meme_upload.log)",
+      "publisher": "daemon hourly (see workspace/meme_publisher.log)",
+      "first": "2026-09-14T09:00:00+00:00",
+      "last": "2026-10-13T09:00:00+00:00"
+    },
+    "trends": {
+      "category": "general",
+      "trending_videos": [
+        {
+          "title": "Top 6 Faceless USA Niches 2026 High RPM | USA Niches | USA Faceless Channel Ideas (Easy Monetized)",
+          "video_id": "IFX8zekgKfc",
+          "url": "https://youtube.com/watch?v=IFX8zekgKfc",
+          "views": "3,828 views",
+          "duration": "4:43",
+          "channel": "A26grow",
+          "published": "19 hours ago"
+        },
+        {
+          "title": "How to Make VIRAL YouTube Shorts in 2026",
+          "video_id": "VUT6HhqKkBA",
+          "url": "https://youtube.com/watch?v=VUT6HhqKkBA",
+          "views": "559,378 views",
+          "duration": "15:27",
+          "channel": "DecodingYT",
+          "published": "2 weeks ago"
+        },
+        {
+          "title": "the 5 best youtube shorts niches that can make you rich",
+          "video_id": "e2EzPt_swPs",
+          "url": "https://youtube.com/watch?v=e2EzPt_swPs",
+          "views": "20,234 views",
+          "duration": "11:55",
+          "channel": "moneyboymax",
+          "published": "4 months ago"
+        },
+        {
+          "title": "The 3 BEST YouTube Shorts Niches That Made Me $80,836",
+          "video_id": "ZucANseJjhw",
+          "url": "https://youtube.com/watch?v=ZucANseJjhw",
+          "views": "18,609 views",
+          "duration": "11:50",
+          "channel": "Brem",
+          "published": "2 months ago"
+        }
+      ],
+      "count": 4
+    },
+    "meme_ideas": {
+      "query": "funny meme ideas for youtube shorts 2026",
+      "results": [
+        {
+          "title": "50 Funny YouTube Shorts Ideas for 2026 - fluxnote.io",
+          "url": "https://fluxnote.io/guides/comedy-youtube-shorts-ideas",
+          "snippet": "Aug 14, 2026 \u00b7 Find 50 funny YouTube Shorts ideas built around relatable humor, sketch formats, recurring characters, visual punchlines, and repeatable comedy series."
+        },
+        {
+          "title": "Best YouTube Shorts Funny Ideas for 2026 - EVR Mag",
+          "url": "https://evrmag.com/best-youtube-shorts-funny-ideas-for-2026/",
+          "snippet": "TLDR: The best YouTube Shorts funny ideas for 2026 will be short, relatable, visually obvious, and built around a quick twist. Focus on formats like AI misunderstandings, workplace mini-sketches, awkward social moments, pet reactions, parody tutorials, and \u201cexpectation vs reality\u201d jokes."
+        },
+        {
+          "title": "60+ YouTube Shorts Ideas for 2026 (With Hooks) - fluxnote.io",
+          "url": "https://fluxnote.io/guides/viral-youtube-shorts-ideas-2026",
+          "snippet": "Aug 14, 2026 \u00b7 This guide gives you 60+ specific, proven Short ideas organized by niche, with the viral mechanics explained for each so you understand not just what to make but why it works."
+        },
+        {
+          "title": "50+ YouTube Shorts Ideas That Actually Go Viral in 2026",
+          "url": "https://deeka.ai/blog/youtube-shorts-ideas-2026",
+          "snippet": "Mar 27, 2026 \u00b7 This guide gives you 50+ YouTube Shorts ideas organized by niche, the five viral formats crushing it right now, and a repeatable AI-powered system (tools like Deeka AI make this much faster) so you never run dry on ideas again."
+        },
+        {
+          "title": "100+ YouTube Shorts Ideas for Every Niche (2026 Master List)",
+          "url": "https://conthunt.app/blog/youtube-shorts-content-ideas",
+          "snippet": "Feb 18, 2026 \u00b7 100+ YouTube Shorts content ideas for 2026, organized by niche, plus how to pick a format without chasing a generic trend."
+        }
+      ],
+      "count": 5
+    },
+    "scripts": [
+      {
+        "topic": "Top 6 Faceless USA Niches 2026 High RPM | USA Niches | USA Faceless Channel Ideas (Easy Monetized)",
+        "hook": "You won't believe what happens with Top 6 Faceless USA Niches 2026",
+        "structure": [
+          "Hook (0-3s)",
+          "Content (3-50s)",
+          "CTA (50-60s)"
+        ],
+        "hashtags": [
+          "#shorts",
+          "#viral",
+          "#trending"
+        ]
+      },
+      {
+        "topic": "How to Make VIRAL YouTube Shorts in 2026",
+        "hook": "You won't believe what happens with How to Make VIRAL YouTube Shor",
+        "structure": [
+          "Hook (0-3s)",
+          "Content (3-50s)",
+          "CTA (50-60s)"
+        ],
+        "hashtags": [
+          "#shorts",
+          "#viral",
+          "#trending"
+        ]
+      },
+      {
+        "topic": "the 5 best youtube shorts niches that can make you rich",
+        "hook": "You won't believe what happens with the 5 best youtube shorts nich",
+        "structure": [
+          "Hook (0-3s)",
+          "Content (3-50s)",
+          "CTA (50-60s)"
+        ],
+        "hashtags": [
+          "#shorts",
+          "#viral",
+          "#trending"
+        ]
+      }
+    ],
+    "upload_info": {
+      "query": "how to upload youtube shorts API programmatically",
+      "results": [
+        {
+          "title": "YouTube Shorts API: How to Upload Shorts Programmatically",
+          "url": "https://www.veed.io/learn/youtube-shorts-api",
+          "snippet": "No dedicated Shorts API exists, but you can upload and publish YouTube Shorts programmatically using the YouTube Data API v3. Here's exactly how."
+        },
+        {
+          "title": "How to Upload YouTube Shorts via API (with Scheduling)",
+          "url": "https://www.postpeer.dev/blog/how-to-upload-youtube-shorts-with-api",
+          "snippet": "Post YouTube Shorts programmatically using an API. Auto-detection by vertical aspect ratio, scheduling, and cross-posting to TikTok and Instagram Reels."
+        },
+        {
+          "title": "YouTube Upload API: Videos & Shorts (2026) | Postproxy",
+          "url": "https://postproxy.dev/blog/youtube-upload-api-guide/",
+          "snippet": "Upload videos and Shorts to YouTube via API: OAuth setup, resumable uploads, quota limits, and code examples in Python and Node.js."
+        }
+      ],
+      "count": 3
+    }
+  }
+}

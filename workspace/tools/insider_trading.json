@@ -1,0 +1,58 @@
+{
+  "total_transactions": 20,
+  "buys": 10,
+  "sells": 10,
+  "total_buy_value": 113817981.94,
+  "total_sell_value": 116328783.94,
+  "buy_sell_ratio": 0.98,
+  "signal": "neutral",
+  "cluster_buying": false,
+  "cluster_selling": false,
+  "recent_transactions": [
+    {
+      "insider": "Satya Nadella",
+      "type": "Buy",
+      "shares": 13231,
+      "price": 393.12,
+      "value": 5201338.34,
+      "date": "2026-09-08",
+      "shares_owned": 3534669
+    },
+    {
+      "insider": "Satya Nadella",
+      "type": "Sell",
+      "shares": 69363,
+      "price": 378.78,
+      "value": 26272992.48,
+      "date": "2026-09-07",
+      "shares_owned": 691043
+    },
+    {
+      "insider": "Sundar Pichai",
+      "type": "Sell",
+      "shares": 58331,
+      "price": 336.44,
+      "value": 19624853.31,
+      "date": "2026-09-05",
+      "shares_owned": 2827598
+    },
+    {
+      "insider": "Tim Cook",
+      "type": "Buy",
+      "shares": 55174,
+      "price": 263.84,
+      "value": 14557227.36,
+      "date": "2026-09-04",
+      "shares_owned": 3241744
+    },
+    {
+      "insider": "Andy Jassy",
+      "type": "Sell",
+      "shares": 2248,
+      "price": 129.07,
+      "value": 290145.69,
+      "date": "2026-09-03",
+      "shares_owned": 113633
+    }
+  ]
+}

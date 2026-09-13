@@ -1,0 +1,121 @@
+{
+  "calendar": [
+    {
+      "symbol": "JNJ",
+      "name": "Johnson & Johnson",
+      "sector": "Healthcare",
+      "date": "2026-09-14",
+      "time": "after_close",
+      "eps_estimate": 4.17,
+      "revenue_estimate_b": 98.3,
+      "days_until": 2,
+      "importance": "medium"
+    },
+    {
+      "symbol": "NVDA",
+      "name": "NVIDIA Corp",
+      "sector": "Technology",
+      "date": "2026-09-18",
+      "time": "after_close",
+      "eps_estimate": 4.96,
+      "revenue_estimate_b": 80.46,
+      "days_until": 6,
+      "importance": "medium"
+    },
+    {
+      "symbol": "TSLA",
+      "name": "Tesla Inc.",
+      "sector": "Consumer Cyclical",
+      "date": "2026-09-23",
+      "time": "after_close",
+      "eps_estimate": 4.75,
+      "revenue_estimate_b": 33.59,
+      "days_until": 11,
+      "importance": "medium"
+    },
+    {
+      "symbol": "JPM",
+      "name": "JPMorgan Chase",
+      "sector": "Financial",
+      "date": "2026-09-24",
+      "time": "before_open",
+      "eps_estimate": 3.07,
+      "revenue_estimate_b": 91.24,
+      "days_until": 12,
+      "importance": "medium"
+    },
+    {
+      "symbol": "AMZN",
+      "name": "Amazon.com Inc.",
+      "sector": "Consumer Cyclical",
+      "date": "2026-09-26",
+      "time": "before_open",
+      "eps_estimate": 2.17,
+      "revenue_estimate_b": 90.19,
+      "days_until": 14,
+      "importance": "high"
+    },
+    {
+      "symbol": "AAPL",
+      "name": "Apple Inc.",
+      "sector": "Technology",
+      "date": "2026-09-27",
+      "time": "before_open",
+      "eps_estimate": 4.9,
+      "revenue_estimate_b": 76.56,
+      "days_until": 15,
+      "importance": "high"
+    },
+    {
+      "symbol": "META",
+      "name": "Meta Platforms",
+      "sector": "Technology",
+      "date": "2026-09-28",
+      "time": "before_open",
+      "eps_estimate": 1.59,
+      "revenue_estimate_b": 27.15,
+      "days_until": 16,
+      "importance": "medium"
+    },
+    {
+      "symbol": "GOOGL",
+      "name": "Alphabet Inc.",
+      "sector": "Technology",
+      "date": "2026-10-08",
+      "time": "before_open",
+      "eps_estimate": 1.82,
+      "revenue_estimate_b": 31.13,
+      "days_until": 26,
+      "importance": "high"
+    },
+    {
+      "symbol": "MSFT",
+      "name": "Microsoft Corp",
+      "sector": "Technology",
+      "date": "2026-10-14",
+      "time": "after_close",
+      "eps_estimate": 3.57,
+      "revenue_estimate_b": 40.03,
+      "days_until": 32,
+      "importance": "high"
+    },
+    {
+      "symbol": "V",
+      "name": "Visa Inc.",
+      "sector": "Financial",
+      "date": "2026-10-29",
+      "time": "before_open",
+      "eps_estimate": 3.89,
+      "revenue_estimate_b": 92.79,
+      "days_until": 47,
+      "importance": "medium"
+    }
+  ],
+  "surprise_example": {
+    "actual": 2.18,
+    "estimate": 1.95,
+    "surprise_pct": 11.79,
+    "beat": true,
+    "magnitude": "large"
+  }
+}

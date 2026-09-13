@@ -1,0 +1,17 @@
+{
+  "bollinger": {
+    "upper_band": 100.89,
+    "middle_band": 99.6,
+    "lower_band": 98.31,
+    "bandwidth": 2.58,
+    "percent_b": 0.4849,
+    "current_price": 99.5608684200883,
+    "squeeze": true,
+    "signal": "hold"
+  },
+  "squeeze_analysis": {
+    "squeeze_periods": 90,
+    "total_periods": 90,
+    "squeeze_ratio": 1.0
+  }
+}

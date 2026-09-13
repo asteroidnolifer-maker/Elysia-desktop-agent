@@ -1,0 +1,117 @@
+{
+  "actions": [
+    {
+      "type": "stock_split",
+      "ratio": "3:1",
+      "announcement_date": "2026-08-31",
+      "effective_date": "2026-10-02",
+      "price_impact": "~33% price decrease expected"
+    },
+    {
+      "type": "dividend",
+      "amount": 1.86,
+      "ex_date": "2026-09-25",
+      "payment_date": "2026-10-13",
+      "yield": 2.58
+    },
+    {
+      "type": "dividend",
+      "amount": 3.78,
+      "ex_date": "2026-10-08",
+      "payment_date": "2026-10-29",
+      "yield": 5.78
+    },
+    {
+      "type": "dividend",
+      "amount": 0.77,
+      "ex_date": "2026-09-29",
+      "payment_date": "2026-11-01",
+      "yield": 0.41
+    },
+    {
+      "type": "special_dividend",
+      "amount": 3.61,
+      "ex_date": "2026-09-25",
+      "payment_date": "2026-10-28",
+      "yield": 1.93
+    },
+    {
+      "type": "stock_split",
+      "ratio": "10:1",
+      "announcement_date": "2026-08-25",
+      "effective_date": "2026-10-30",
+      "price_impact": "~10% price decrease expected"
+    },
+    {
+      "type": "dividend",
+      "amount": 0.83,
+      "ex_date": "2026-10-12",
+      "payment_date": "2026-10-17",
+      "yield": 0.64
+    },
+    {
+      "type": "dividend",
+      "amount": 0.61,
+      "ex_date": "2026-09-15",
+      "payment_date": "2026-11-11",
+      "yield": 0.66
+    },
+    {
+      "type": "stock_split",
+      "ratio": "2:1",
+      "announcement_date": "2026-08-27",
+      "effective_date": "2026-10-21",
+      "price_impact": "~50% price decrease expected"
+    },
+    {
+      "type": "stock_split",
+      "ratio": "10:1",
+      "announcement_date": "2026-09-05",
+      "effective_date": "2026-09-25",
+      "price_impact": "~10% price decrease expected"
+    },
+    {
+      "type": "dividend",
+      "amount": 1.83,
+      "ex_date": "2026-10-07",
+      "payment_date": "2026-11-07",
+      "yield": 0.96
+    },
+    {
+      "type": "special_dividend",
+      "amount": 3.23,
+      "ex_date": "2026-09-22",
+      "payment_date": "2026-11-03",
+      "yield": 3.29
+    },
+    {
+      "type": "special_dividend",
+      "amount": 2.14,
+      "ex_date": "2026-10-09",
+      "payment_date": "2026-10-24",
+      "yield": 1.07
+    },
+    {
+      "type": "dividend",
+      "amount": 2.8,
+      "ex_date": "2026-10-07",
+      "payment_date": "2026-10-28",
+      "yield": 1.59
+    },
+    {
+      "type": "dividend",
+      "amount": 4.72,
+      "ex_date": "2026-10-05",
+      "payment_date": "2026-10-19",
+      "yield": 2.53
+    }
+  ],
+  "dividend_analysis": {
+    "current_yield": 8.16,
+    "payout_ratio": 28.6,
+    "sustainable": true,
+    "dividend_growth_rate": 5.92,
+    "years_of_growth": 5,
+    "risk_level": "low"
+  }
+}

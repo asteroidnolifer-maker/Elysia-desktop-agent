@@ -1,0 +1,105 @@
+{
+  "scan_time": "2026-09-12T16:05:34.191943",
+  "movers": [
+    {
+      "symbol": "META",
+      "regular_close": 311.45,
+      "after_hours_price": 490.8,
+      "change_pct": 6.39,
+      "volume": 746818,
+      "earnings": true,
+      "news": "analyst_initiation",
+      "significance": "high"
+    },
+    {
+      "symbol": "JNJ",
+      "regular_close": 461.9,
+      "after_hours_price": 227.05,
+      "change_pct": 5.78,
+      "volume": 315574,
+      "earnings": false,
+      "news": "downgrade",
+      "significance": "high"
+    },
+    {
+      "symbol": "AMZN",
+      "regular_close": 312.55,
+      "after_hours_price": 133.96,
+      "change_pct": 5.36,
+      "volume": 120042,
+      "earnings": false,
+      "news": "none",
+      "significance": "high"
+    },
+    {
+      "symbol": "MSFT",
+      "regular_close": 173.59,
+      "after_hours_price": 287.84,
+      "change_pct": 4.36,
+      "volume": 1830014,
+      "earnings": false,
+      "news": "downgrade",
+      "significance": "high"
+    },
+    {
+      "symbol": "NVDA",
+      "regular_close": 250.15,
+      "after_hours_price": 176.82,
+      "change_pct": -4.09,
+      "volume": 876241,
+      "earnings": true,
+      "news": "downgrade",
+      "significance": "high"
+    },
+    {
+      "symbol": "JPM",
+      "regular_close": 376.79,
+      "after_hours_price": 189.3,
+      "change_pct": 2.53,
+      "volume": 1524509,
+      "earnings": true,
+      "news": "none",
+      "significance": "moderate"
+    },
+    {
+      "symbol": "GOOGL",
+      "regular_close": 341.07,
+      "after_hours_price": 225.22,
+      "change_pct": 2.23,
+      "volume": 1053374,
+      "earnings": false,
+      "news": "analyst_initiation",
+      "significance": "moderate"
+    },
+    {
+      "symbol": "TSLA",
+      "regular_close": 287.52,
+      "after_hours_price": 507.94,
+      "change_pct": 1.54,
+      "volume": 1330222,
+      "earnings": false,
+      "news": "upgrade",
+      "significance": "moderate"
+    },
+    {
+      "symbol": "V",
+      "regular_close": 484.32,
+      "after_hours_price": 518.29,
+      "change_pct": -0.86,
+      "volume": 596260,
+      "earnings": false,
+      "news": "upgrade",
+      "significance": "low"
+    },
+    {
+      "symbol": "AAPL",
+      "regular_close": 478.88,
+      "after_hours_price": 175.9,
+      "change_pct": 0.49,
+      "volume": 753504,
+      "earnings": false,
+      "news": "upgrade",
+      "significance": "low"
+    }
+  ]
+}

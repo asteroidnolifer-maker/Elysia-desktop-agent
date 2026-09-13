@@ -1,0 +1,11 @@
+/* SELinux policy module template for agent-core (example)
+   Adapt and compile for your ROM's SELinux policy tooling.
+*/
+
+policy_module(agent_core, 1.0)
+
+require {
+	type init; class process transition;
+}
+
+allow init agent_core_exec:file { read execute };

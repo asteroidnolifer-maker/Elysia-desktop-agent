@@ -1,0 +1,106 @@
+{
+  "products": [
+    {
+      "id": "AliExpress_157215",
+      "title": "Product 4 - Electronics Item",
+      "price": 32.58,
+      "shipping_cost": 6.3,
+      "total_cost": 38.88,
+      "delivery_days": 10,
+      "orders": 9012,
+      "rating": 3.6,
+      "seller_score": 93,
+      "image_url": "https://img.aliexpress.com/item_4.jpg",
+      "tracking_available": false,
+      "free_shipping": false
+    },
+    {
+      "id": "AliExpress_781796",
+      "title": "Product 2 - Electronics Item",
+      "price": 37.64,
+      "shipping_cost": 5.88,
+      "total_cost": 43.52,
+      "delivery_days": 30,
+      "orders": 5534,
+      "rating": 4.5,
+      "seller_score": 97,
+      "image_url": "https://img.aliexpress.com/item_2.jpg",
+      "tracking_available": true,
+      "free_shipping": false
+    },
+    {
+      "id": "AliExpress_713988",
+      "title": "Product 5 - Electronics Item",
+      "price": 12.61,
+      "shipping_cost": 5.17,
+      "total_cost": 17.78,
+      "delivery_days": 38,
+      "orders": 1951,
+      "rating": 4.6,
+      "seller_score": 95,
+      "image_url": "https://img.aliexpress.com/item_5.jpg",
+      "tracking_available": true,
+      "free_shipping": false
+    },
+    {
+      "id": "AliExpress_335213",
+      "title": "Product 3 - Electronics Item",
+      "price": 19.31,
+      "shipping_cost": 4.04,
+      "total_cost": 23.35,
+      "delivery_days": 12,
+      "orders": 1940,
+      "rating": 4.5,
+      "seller_score": 81,
+      "image_url": "https://img.aliexpress.com/item_3.jpg",
+      "tracking_available": false,
+      "free_shipping": false
+    },
+    {
+      "id": "AliExpress_526096",
+      "title": "Product 1 - Electronics Item",
+      "price": 5.15,
+      "shipping_cost": 2.94,
+      "total_cost": 8.09,
+      "delivery_days": 33,
+      "orders": 316,
+      "rating": 5.0,
+      "seller_score": 80,
+      "image_url": "https://img.aliexpress.com/item_1.jpg",
+      "tracking_available": false,
+      "free_shipping": false
+    }
+  ],
+  "shipping_methods": {
+    "ePacket": {
+      "days": "12-20",
+      "cost": "free-$2",
+      "reliable": true
+    },
+    "AliExpress Standard": {
+      "days": "15-25",
+      "cost": "$1-$5",
+      "reliable": true
+    },
+    "China Post Registered": {
+      "days": "20-40",
+      "cost": "free-$1",
+      "reliable": false
+    },
+    "DHL": {
+      "days": "5-10",
+      "cost": "$15-$30",
+      "reliable": true
+    },
+    "FedEx": {
+      "days": "5-12",
+      "cost": "$12-$25",
+      "reliable": true
+    },
+    "UPS": {
+      "days": "7-14",
+      "cost": "$10-$20",
+      "reliable": true
+    }
+  }
+}

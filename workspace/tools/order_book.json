@@ -1,0 +1,112 @@
+{
+  "bids": [
+    {
+      "price": 178.4,
+      "volume": 3624,
+      "total": 3624
+    },
+    {
+      "price": 178.3,
+      "volume": 2347,
+      "total": 5971
+    },
+    {
+      "price": 178.2,
+      "volume": 4181,
+      "total": 10152
+    },
+    {
+      "price": 178.1,
+      "volume": 4832,
+      "total": 14984
+    },
+    {
+      "price": 178.0,
+      "volume": 859,
+      "total": 15843
+    },
+    {
+      "price": 177.9,
+      "volume": 3522,
+      "total": 19365
+    },
+    {
+      "price": 177.8,
+      "volume": 1748,
+      "total": 21113
+    },
+    {
+      "price": 177.7,
+      "volume": 4232,
+      "total": 25345
+    },
+    {
+      "price": 177.6,
+      "volume": 2898,
+      "total": 28243
+    },
+    {
+      "price": 177.5,
+      "volume": 4049,
+      "total": 32292
+    }
+  ],
+  "asks": [
+    {
+      "price": 178.6,
+      "volume": 3419,
+      "total": 3419
+    },
+    {
+      "price": 178.7,
+      "volume": 4039,
+      "total": 7458
+    },
+    {
+      "price": 178.8,
+      "volume": 3063,
+      "total": 10521
+    },
+    {
+      "price": 178.9,
+      "volume": 4522,
+      "total": 15043
+    },
+    {
+      "price": 179.0,
+      "volume": 1187,
+      "total": 16230
+    },
+    {
+      "price": 179.1,
+      "volume": 721,
+      "total": 16951
+    },
+    {
+      "price": 179.2,
+      "volume": 3723,
+      "total": 20674
+    },
+    {
+      "price": 179.3,
+      "volume": 1394,
+      "total": 22068
+    },
+    {
+      "price": 179.4,
+      "volume": 1331,
+      "total": 23399
+    },
+    {
+      "price": 179.5,
+      "volume": 3089,
+      "total": 26488
+    }
+  ],
+  "spread": 0.2,
+  "spread_pct": 0.112,
+  "bid_depth": 32292,
+  "ask_depth": 26488,
+  "imbalance": 0.0987,
+  "signal": "balanced"
+}

@@ -1,0 +1,157 @@
+[
+  {
+    "original": "product_0.jpg",
+    "optimized_versions": [
+      {
+        "suffix": "_thumb",
+        "width": 150,
+        "height": 150,
+        "size_kb": 134.7
+      },
+      {
+        "suffix": "_medium",
+        "width": 600,
+        "height": 600,
+        "size_kb": 404.2
+      },
+      {
+        "suffix": "_large",
+        "width": 1200,
+        "height": 1200,
+        "size_kb": 673.6
+      }
+    ],
+    "formats": {
+      "webp": 538.9,
+      "avif": 404.2,
+      "jpg": 808.3
+    },
+    "recommended_format": "webp",
+    "total_savings_kb": 808.3,
+    "savings_pct": 60
+  },
+  {
+    "original": "product_1.jpg",
+    "optimized_versions": [
+      {
+        "suffix": "_thumb",
+        "width": 150,
+        "height": 150,
+        "size_kb": 245.5
+      },
+      {
+        "suffix": "_medium",
+        "width": 600,
+        "height": 600,
+        "size_kb": 736.4
+      },
+      {
+        "suffix": "_large",
+        "width": 1200,
+        "height": 1200,
+        "size_kb": 1227.3
+      }
+    ],
+    "formats": {
+      "webp": 981.9,
+      "avif": 736.4,
+      "jpg": 1472.8
+    },
+    "recommended_format": "webp",
+    "total_savings_kb": 1472.8,
+    "savings_pct": 60
+  },
+  {
+    "original": "product_2.jpg",
+    "optimized_versions": [
+      {
+        "suffix": "_thumb",
+        "width": 150,
+        "height": 150,
+        "size_kb": 63.8
+      },
+      {
+        "suffix": "_medium",
+        "width": 600,
+        "height": 600,
+        "size_kb": 191.2
+      },
+      {
+        "suffix": "_large",
+        "width": 1200,
+        "height": 1200,
+        "size_kb": 318.8
+      }
+    ],
+    "formats": {
+      "webp": 255.0,
+      "avif": 191.2,
+      "jpg": 382.5
+    },
+    "recommended_format": "webp",
+    "total_savings_kb": 382.5,
+    "savings_pct": 60
+  },
+  {
+    "original": "product_3.jpg",
+    "optimized_versions": [
+      {
+        "suffix": "_thumb",
+        "width": 150,
+        "height": 150,
+        "size_kb": 172.2
+      },
+      {
+        "suffix": "_medium",
+        "width": 600,
+        "height": 600,
+        "size_kb": 516.5
+      },
+      {
+        "suffix": "_large",
+        "width": 1200,
+        "height": 1200,
+        "size_kb": 860.9
+      }
+    ],
+    "formats": {
+      "webp": 688.7,
+      "avif": 516.5,
+      "jpg": 1033.0
+    },
+    "recommended_format": "webp",
+    "total_savings_kb": 1033.0,
+    "savings_pct": 60
+  },
+  {
+    "original": "product_4.jpg",
+    "optimized_versions": [
+      {
+        "suffix": "_thumb",
+        "width": 150,
+        "height": 150,
+        "size_kb": 294.2
+      },
+      {
+        "suffix": "_medium",
+        "width": 600,
+        "height": 600,
+        "size_kb": 882.5
+      },
+      {
+        "suffix": "_large",
+        "width": 1200,
+        "height": 1200,
+        "size_kb": 1470.9
+      }
+    ],
+    "formats": {
+      "webp": 1176.7,
+      "avif": 882.5,
+      "jpg": 1765.1
+    },
+    "recommended_format": "webp",
+    "total_savings_kb": 1765.1,
+    "savings_pct": 60
+  }
+]

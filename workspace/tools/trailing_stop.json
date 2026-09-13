@@ -1,0 +1,73 @@
+{
+  "stop": {
+    "entry_price": 100,
+    "highest_price": 120,
+    "trail_pct": 5,
+    "stop_price": 114.0,
+    "risk_per_share": -14.0,
+    "risk_pct": -14.0,
+    "protected_gain": 20,
+    "protected_gain_pct": 20.0,
+    "status": "profit_protected"
+  },
+  "optimization": {
+    "results": [
+      {
+        "trail_pct": 2,
+        "return_pct": -56.14
+      },
+      {
+        "trail_pct": 3,
+        "return_pct": -54.87
+      },
+      {
+        "trail_pct": 4,
+        "return_pct": -73.42
+      },
+      {
+        "trail_pct": 5,
+        "return_pct": -73.42
+      },
+      {
+        "trail_pct": 6,
+        "return_pct": -68.16
+      },
+      {
+        "trail_pct": 7,
+        "return_pct": -68.16
+      },
+      {
+        "trail_pct": 8,
+        "return_pct": -64.97
+      },
+      {
+        "trail_pct": 9,
+        "return_pct": -63.5
+      },
+      {
+        "trail_pct": 10,
+        "return_pct": -52.89
+      },
+      {
+        "trail_pct": 11,
+        "return_pct": -66.13
+      },
+      {
+        "trail_pct": 12,
+        "return_pct": -50.33
+      },
+      {
+        "trail_pct": 13,
+        "return_pct": -49.65
+      },
+      {
+        "trail_pct": 14,
+        "return_pct": -49.65
+      }
+    ],
+    "optimal": {
+      "trail_pct": 13,
+      "return_pct": -49.65
+    }
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "matrix": {
+    "AAPL": {
+      "AAPL": 1.0,
+      "MSFT": 0.0615,
+      "GOOGL": -0.0392,
+      "AMZN": -0.0005,
+      "TSLA": 0.0092
+    },
+    "MSFT": {
+      "AAPL": 0.0615,
+      "MSFT": 1.0,
+      "GOOGL": -0.1037,
+      "AMZN": 0.0021,
+      "TSLA": 0.0162
+    },
+    "GOOGL": {
+      "AAPL": -0.0392,
+      "MSFT": -0.1037,
+      "GOOGL": 1.0,
+      "AMZN": 0.0177,
+      "TSLA": 0.0002
+    },
+    "AMZN": {
+      "AAPL": -0.0005,
+      "MSFT": 0.0021,
+      "GOOGL": 0.0177,
+      "AMZN": 1.0,
+      "TSLA": 0.0346
+    },
+    "TSLA": {
+      "AAPL": 0.0092,
+      "MSFT": 0.0162,
+      "GOOGL": 0.0002,
+      "AMZN": 0.0346,
+      "TSLA": 1.0
+    }
+  },
+  "diversification_pairs": [
+    {
+      "pair": "GOOGL/TSLA",
+      "correlation": 0.0002
+    },
+    {
+      "pair": "AAPL/AMZN",
+      "correlation": -0.0005
+    },
+    {
+      "pair": "MSFT/AMZN",
+      "correlation": 0.0021
+    },
+    {
+      "pair": "AAPL/TSLA",
+      "correlation": 0.0092
+    },
+    {
+      "pair": "MSFT/TSLA",
+      "correlation": 0.0162
+    },
+    {
+      "pair": "GOOGL/AMZN",
+      "correlation": 0.0177
+    },
+    {
+      "pair": "AMZN/TSLA",
+      "correlation": 0.0346
+    },
+    {
+      "pair": "AAPL/GOOGL",
+      "correlation": -0.0392
+    },
+    {
+      "pair": "AAPL/MSFT",
+      "correlation": 0.0615
+    },
+    {
+      "pair": "MSFT/GOOGL",
+      "correlation": -0.1037
+    }
+  ]
+}

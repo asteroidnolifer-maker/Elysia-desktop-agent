@@ -1,0 +1,9 @@
+{
+  "short_shares": 50000000,
+  "float_shares": 400000000,
+  "short_ratio": 0.125,
+  "short_percentage": 12.5,
+  "days_to_cover": 6.2,
+  "signal": "high_short_interest",
+  "squeeze_potential": "moderate"
+}

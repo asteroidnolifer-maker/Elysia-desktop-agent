@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ELYSIA</string>
+    <string name="accessibility_otp_description">Allows Elysia to automatically fill detected OTP codes into the text field you are currently using.</string>
+</resources>

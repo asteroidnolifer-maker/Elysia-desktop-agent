@@ -1,0 +1,336 @@
+{
+  "black_scholes": {
+    "price": 4.7418,
+    "delta": 0.4906,
+    "gamma": 0.0312,
+    "theta": -0.0964,
+    "vega": 0.2041,
+    "rho": 0.0681,
+    "d1": -0.0236,
+    "d2": -0.0953,
+    "in_the_money": false,
+    "intrinsic_value": 0,
+    "time_value": 4.7418
+  },
+  "option_chain": [
+    {
+      "strike": 153.5,
+      "call": {
+        "price": 25.8311,
+        "delta": 0.9675,
+        "gamma": 0.0047,
+        "theta": -0.0387,
+        "vega": 0.0372,
+        "rho": 0.1207,
+        "d1": 1.8451,
+        "d2": 1.7591,
+        "in_the_money": true,
+        "intrinsic_value": 25.0,
+        "time_value": 0.8311
+      },
+      "put": {
+        "price": 0.2016,
+        "delta": -0.0325,
+        "gamma": 0.0047,
+        "theta": -0.0194,
+        "vega": 0.0372,
+        "rho": 0.0049,
+        "d1": 1.8451,
+        "d2": 1.7591,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 0.2016
+      }
+    },
+    {
+      "strike": 158.5,
+      "call": {
+        "price": 21.1457,
+        "delta": 0.9296,
+        "gamma": 0.0088,
+        "theta": -0.0544,
+        "vega": 0.069,
+        "rho": 0.119,
+        "d1": 1.4725,
+        "d2": 1.3865,
+        "in_the_money": true,
+        "intrinsic_value": 20.0,
+        "time_value": 1.1457
+      },
+      "put": {
+        "price": 0.4956,
+        "delta": -0.0704,
+        "gamma": 0.0088,
+        "theta": -0.0363,
+        "vega": 0.069,
+        "rho": 0.0107,
+        "d1": 1.4725,
+        "d2": 1.3865,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 0.4956
+      }
+    },
+    {
+      "strike": 163.5,
+      "call": {
+        "price": 16.7407,
+        "delta": 0.8668,
+        "gamma": 0.014,
+        "theta": -0.0739,
+        "vega": 0.1101,
+        "rho": 0.1134,
+        "d1": 1.1113,
+        "d2": 1.0253,
+        "in_the_money": true,
+        "intrinsic_value": 15.0,
+        "time_value": 1.7407
+      },
+      "put": {
+        "price": 1.0701,
+        "delta": -0.1332,
+        "gamma": 0.014,
+        "theta": -0.0585,
+        "vega": 0.1101,
+        "rho": 0.0204,
+        "d1": 1.1113,
+        "d2": 1.0253,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 1.0701
+      }
+    },
+    {
+      "strike": 168.5,
+      "call": {
+        "price": 12.7523,
+        "delta": 0.7767,
+        "gamma": 0.0195,
+        "theta": -0.0937,
+        "vega": 0.1528,
+        "rho": 0.1035,
+        "d1": 0.7611,
+        "d2": 0.6751,
+        "in_the_money": true,
+        "intrinsic_value": 10.0,
+        "time_value": 2.7523
+      },
+      "put": {
+        "price": 2.0613,
+        "delta": -0.2233,
+        "gamma": 0.0195,
+        "theta": -0.0822,
+        "vega": 0.1528,
+        "rho": 0.0345,
+        "d1": 0.7611,
+        "d2": 0.6751,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 2.0613
+      }
+    },
+    {
+      "strike": 173.5,
+      "call": {
+        "price": 9.3059,
+        "delta": 0.6632,
+        "gamma": 0.0238,
+        "theta": -0.1084,
+        "vega": 0.1868,
+        "rho": 0.0896,
+        "d1": 0.4211,
+        "d2": 0.3351,
+        "in_the_money": true,
+        "intrinsic_value": 5.0,
+        "time_value": 4.3059
+      },
+      "put": {
+        "price": 3.5944,
+        "delta": -0.3368,
+        "gamma": 0.0238,
+        "theta": -0.1021,
+        "vega": 0.1868,
+        "rho": 0.0524,
+        "d1": 0.4211,
+        "d2": 0.3351,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 3.5944
+      }
+    },
+    {
+      "strike": 178.5,
+      "call": {
+        "price": 6.4832,
+        "delta": 0.5362,
+        "gamma": 0.0259,
+        "theta": -0.1139,
+        "vega": 0.2033,
+        "rho": 0.0733,
+        "d1": 0.0908,
+        "d2": 0.0048,
+        "in_the_money": false,
+        "intrinsic_value": 0.0,
+        "time_value": 6.4832
+      },
+      "put": {
+        "price": 5.7512,
+        "delta": -0.4638,
+        "gamma": 0.0259,
+        "theta": -0.1138,
+        "vega": 0.2033,
+        "rho": 0.0728,
+        "d1": 0.0908,
+        "d2": 0.0048,
+        "in_the_money": false,
+        "intrinsic_value": 0.0,
+        "time_value": 5.7512
+      }
+    },
+    {
+      "strike": 183.5,
+      "call": {
+        "price": 4.3019,
+        "delta": 0.4089,
+        "gamma": 0.0253,
+        "theta": -0.1088,
+        "vega": 0.1988,
+        "rho": 0.0565,
+        "d1": -0.2304,
+        "d2": -0.3164,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 4.3019
+      },
+      "put": {
+        "price": 8.5494,
+        "delta": -0.5911,
+        "gamma": 0.0253,
+        "theta": -0.115,
+        "vega": 0.1988,
+        "rho": 0.0938,
+        "d1": -0.2304,
+        "d2": -0.3164,
+        "in_the_money": true,
+        "intrinsic_value": 5.0,
+        "time_value": 3.5494
+      }
+    },
+    {
+      "strike": 188.5,
+      "call": {
+        "price": 2.7152,
+        "delta": 0.2936,
+        "gamma": 0.0224,
+        "theta": -0.0949,
+        "vega": 0.1762,
+        "rho": 0.0408,
+        "d1": -0.543,
+        "d2": -0.629,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 2.7152
+      },
+      "put": {
+        "price": 11.9422,
+        "delta": -0.7064,
+        "gamma": 0.0224,
+        "theta": -0.107,
+        "vega": 0.1762,
+        "rho": 0.1135,
+        "d1": -0.543,
+        "d2": -0.629,
+        "in_the_money": true,
+        "intrinsic_value": 10.0,
+        "time_value": 1.9422
+      }
+    },
+    {
+      "strike": 193.5,
+      "call": {
+        "price": 1.6295,
+        "delta": 0.1984,
+        "gamma": 0.0181,
+        "theta": -0.0759,
+        "vega": 0.1426,
+        "rho": 0.0278,
+        "d1": -0.8474,
+        "d2": -0.9334,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 1.6295
+      },
+      "put": {
+        "price": 15.836,
+        "delta": -0.8016,
+        "gamma": 0.0181,
+        "theta": -0.0931,
+        "vega": 0.1426,
+        "rho": 0.1306,
+        "d1": -0.8474,
+        "d2": -0.9334,
+        "in_the_money": true,
+        "intrinsic_value": 15.0,
+        "time_value": 0.836
+      }
+    },
+    {
+      "strike": 198.5,
+      "call": {
+        "price": 0.9303,
+        "delta": 0.1263,
+        "gamma": 0.0135,
+        "theta": -0.056,
+        "vega": 0.1061,
+        "rho": 0.0178,
+        "d1": -1.144,
+        "d2": -1.23,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 0.9303
+      },
+      "put": {
+        "price": 20.1162,
+        "delta": -0.8737,
+        "gamma": 0.0135,
+        "theta": -0.0772,
+        "vega": 0.1061,
+        "rho": 0.1447,
+        "d1": -1.144,
+        "d2": -1.23,
+        "in_the_money": true,
+        "intrinsic_value": 20.0,
+        "time_value": 0.1162
+      }
+    },
+    {
+      "strike": 203.5,
+      "call": {
+        "price": 0.5056,
+        "delta": 0.0759,
+        "gamma": 0.0093,
+        "theta": -0.0383,
+        "vega": 0.0731,
+        "rho": 0.0107,
+        "d1": -1.4332,
+        "d2": -1.5192,
+        "in_the_money": false,
+        "intrinsic_value": 0,
+        "time_value": 0.5056
+      },
+      "put": {
+        "price": 24.6711,
+        "delta": -0.9241,
+        "gamma": 0.0093,
+        "theta": -0.0625,
+        "vega": 0.0731,
+        "rho": 0.1559,
+        "d1": -1.4332,
+        "d2": -1.5192,
+        "in_the_money": true,
+        "intrinsic_value": 25.0,
+        "time_value": -0.3289
+      }
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "processed": 10,
+  "approved": 2,
+  "total_refunded": 128.42,
+  "results": [
+    {
+      "order_id": "ORD-0",
+      "amount": 30.79,
+      "eligible": true,
+      "refund_amount": 30.79,
+      "reason": "not_as_described",
+      "auto_approved": true,
+      "status": "refunded",
+      "processing_time": "immediate"
+    },
+    {
+      "order_id": "ORD-1",
+      "amount": 73.59,
+      "eligible": false,
+      "refund_amount": 0,
+      "reason": "wrong_item",
+      "auto_approved": false,
+      "status": "denied",
+      "processing_time": "manual_review"
+    },
+    {
+      "order_id": "ORD-2",
+      "amount": 25.81,
+      "eligible": false,
+      "refund_amount": 0,
+      "reason": "wrong_item",
+      "auto_approved": false,
+      "status": "denied",
+      "processing_time": "manual_review"
+    },
+    {
+      "order_id": "ORD-3",
+      "amount": 21.8,
+      "eligible": true,
+      "refund_amount": 21.8,
+      "reason": "wrong_item",
+      "auto_approved": true,
+      "status": "refunded",
+      "processing_time": "immediate"
+    },
+    {
+      "order_id": "ORD-4",
+      "amount": 75.83,
+      "eligible": true,
+      "refund_amount": 75.83,
+      "reason": "defective",
+      "auto_approved": false,
+      "status": "refunded",
+      "processing_time": "immediate"
+    },
+    {
+      "order_id": "ORD-5",
+      "amount": 91.22,
+      "eligible": false,
+      "refund_amount": 0,
+      "reason": "not_as_described",
+      "auto_approved": false,
+      "status": "denied",
+      "processing_time": "manual_review"
+    },
+    {
+      "order_id": "ORD-6",
+      "amount": 29.12,
+      "eligible": false,
+      "refund_amount": 0,
+      "reason": "not_as_described",
+      "auto_approved": false,
+      "status": "denied",
+      "processing_time": "manual_review"
+    },
+    {
+      "order_id": "ORD-7",
+      "amount": 75.33,
+      "eligible": false,
+      "refund_amount": 0,
+      "reason": "defective",
+      "auto_approved": false,
+      "status": "denied",
+      "processing_time": "manual_review"
+    },
+    {
+      "order_id": "ORD-8",
+      "amount": 45.98,
+      "eligible": false,
+      "refund_amount": 0,
+      "reason": "defective",
+      "auto_approved": false,
+      "status": "denied",
+      "processing_time": "manual_review"
+    },
+    {
+      "order_id": "ORD-9",
+      "amount": 78.45,
+      "eligible": false,
+      "refund_amount": 0,
+      "reason": "defective",
+      "auto_approved": false,
+      "status": "denied",
+      "processing_time": "manual_review"
+    }
+  ]
+}

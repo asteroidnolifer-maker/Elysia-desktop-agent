@@ -1,0 +1,54 @@
+{
+  "weight_kg": 0.5,
+  "destination": "US",
+  "options": [
+    {
+      "method": "China Post",
+      "cost": 0.15,
+      "delivery": "20-40",
+      "cost_per_kg": 0.3
+    },
+    {
+      "method": "ePacket",
+      "cost": 0.25,
+      "delivery": "12-20",
+      "cost_per_kg": 0.5
+    },
+    {
+      "method": "AliExpress Standard",
+      "cost": 1.75,
+      "delivery": "15-25",
+      "cost_per_kg": 3.5
+    },
+    {
+      "method": "UPS Worldwide",
+      "cost": 11.75,
+      "delivery": "7-14",
+      "cost_per_kg": 23.5
+    },
+    {
+      "method": "FedEx International",
+      "cost": 14.0,
+      "delivery": "5-12",
+      "cost_per_kg": 28.0
+    },
+    {
+      "method": "DHL Express",
+      "cost": 17.5,
+      "delivery": "5-10",
+      "cost_per_kg": 35.0
+    }
+  ],
+  "cheapest": {
+    "method": "China Post",
+    "cost": 0.15,
+    "delivery": "20-40",
+    "cost_per_kg": 0.3
+  },
+  "fastest": {
+    "method": "FedEx International",
+    "cost": 14.0,
+    "delivery": "5-12",
+    "cost_per_kg": 28.0
+  }
+}

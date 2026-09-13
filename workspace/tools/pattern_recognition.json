@@ -1,0 +1,17 @@
+{
+  "head_shoulders": {
+    "detected": true,
+    "pattern": "head_and_shoulders",
+    "left_shoulder": 105,
+    "head": 108,
+    "right_shoulder": 105,
+    "neckline": 97,
+    "target": 86,
+    "confidence": 100.0,
+    "bearish": true
+  },
+  "inverse_head_shoulders": {
+    "detected": false,
+    "peaks_found": 2
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "stores_synced": 2,
+  "updates": 6,
+  "log": [
+    {
+      "store": "Shopify",
+      "sku": "SKU1",
+      "old": 10,
+      "new": 15,
+      "action": "updated"
+    },
+    {
+      "store": "Shopify",
+      "sku": "SKU2",
+      "old": 5,
+      "new": 12,
+      "action": "updated"
+    },
+    {
+      "store": "Shopify",
+      "sku": "SKU3",
+      "old": 0,
+      "new": 20,
+      "action": "updated"
+    },
+    {
+      "store": "Amazon",
+      "sku": "SKU1",
+      "old": 8,
+      "new": 15,
+      "action": "updated"
+    },
+    {
+      "store": "Amazon",
+      "sku": "SKU2",
+      "old": 7,
+      "new": 12,
+      "action": "updated"
+    },
+    {
+      "store": "Amazon",
+      "sku": "SKU3",
+      "old": 0,
+      "new": 20,
+      "action": "updated"
+    }
+  ]
+}

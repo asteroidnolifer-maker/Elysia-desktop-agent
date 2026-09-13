@@ -1,0 +1,39 @@
+Project: Elysia (working copy moved to large partition)
+Date: 2026-09-06
+
+Current status:
+- User `myusername`'s working `elysia` folder has been moved to:
+  /data/Elysia/AI-project/elysia-home
+  A symlink was created at: /home/myusername/elysia -> /data/Elysia/AI-project/elysia-home
+- Orchestrator & adaptive scripts are present under `orchestrator/` and are the
+  active coordination point for agent workers.
+- Recent actions performed:
+  - Hardened `adaptive.sh` and `worker.sh` for OOM safety and model fallback.
+  - Added an interactive intake (`intake.py`) and a desktop launcher (`launch-elysia-task.sh`).
+  - Performed a safe restart of the inference stack (llama-server + agent-core) and
+    launched an adaptive worker pool to continue queued tasks.
+
+What we are doing now:
+- Working from the copy under `/data/Elysia/AI-project/elysia-home` (large partition).
+- Intake flow is enabled: you can run `python3 /home/myusername/elysia/orchestrator/intake.py` to submit a new goal.
+- The adaptive worker pool is managed with `/home/myusername/elysia/orchestrator/adaptive.sh` and can be safely restarted with `safe-restart.sh`.
+
+What will happen next (immediate plan):
+1) Start the full agent stack and adaptive pool (cap configurable, default 12).
+2) Enqueue or resume remaining tasks in the taskboard and let agents claim them.
+3) Monitor memory and worker logs; scale pool up or down if needed.
+
+Notes / backups:
+- The original home copy (before the move) was backed up at:
+  /home/myusername/elysia.backup.* (check timestamps in the directory listing)
+- Some files under `/data/Elysia/elysia` belonged to system/other owners; to avoid
+  accidental overwrites we placed the user copy under `/data/Elysia/AI-project/elysia-home`.
+
+How to interact (quick commands):
+  - Check stack: `bash /home/myusername/elysia/orchestrator/elysia-run.sh status`
+  - Start stack: `bash /home/myusername/elysia/orchestrator/start-stack.sh`
+  - Start adaptive pool safely: `bash /home/myusername/elysia/orchestrator/safe-restart.sh 12`
+  - Watch adaptive log: `tail -f /home/myusername/elysia/orchestrator/.adaptive/adaptive.log`
+  - List tasks: `python3 /home/myusername/elysia/orchestrator/taskboard.py list`
+
+If anything here looks wrong, tell me and I will adjust (move to another path, change symlink, or restore from backup).

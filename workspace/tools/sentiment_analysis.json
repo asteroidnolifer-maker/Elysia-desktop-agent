@@ -1,0 +1,43 @@
+{
+  "individual": [
+    {
+      "score": 1.0,
+      "label": "positive",
+      "positive_words": 4,
+      "negative_words": 0,
+      "confidence": 1.0
+    },
+    {
+      "score": -1.0,
+      "label": "negative",
+      "positive_words": 0,
+      "negative_words": 2,
+      "confidence": 1.0
+    },
+    {
+      "score": 1.0,
+      "label": "positive",
+      "positive_words": 2,
+      "negative_words": 0,
+      "confidence": 1.0
+    },
+    {
+      "score": -1.0,
+      "label": "negative",
+      "positive_words": 0,
+      "negative_words": 1,
+      "confidence": 1.0
+    },
+    {
+      "score": 1.0,
+      "label": "positive",
+      "positive_words": 1,
+      "negative_words": 0,
+      "confidence": 1.0
+    }
+  ],
+  "average_score": 0.2,
+  "overall": "positive",
+  "bullish_count": 3,
+  "bearish_count": 2
+}

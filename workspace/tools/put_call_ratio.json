@@ -1,0 +1,17 @@
+{
+  "current": {
+    "ratio": 0.72,
+    "signal": "neutral",
+    "calls": 2500000,
+    "puts": 1800000
+  },
+  "historical": {
+    "current": 0.580990613549596,
+    "average": 0.8676,
+    "recent_average": 0.9452,
+    "z_score": -1.13,
+    "trend": "increasing",
+    "extreme": false,
+    "interpretation": "normal"
+  }
+}

@@ -1,0 +1,13 @@
+on early-init
+	# Example init.rc fragment to start agent-core on boot (custom ROM integration)
+	# Place this in your device's init scripts or include in the ROM overlay.
+
+service elysia /system/bin/elysia
+	class main
+	user root
+	group root
+	setenv GOMAXPROCS 4
+	oneshot
+
+on property:sys.boot_completed=1
+	start elysia

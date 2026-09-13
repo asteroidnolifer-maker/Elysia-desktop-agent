@@ -1,0 +1,82 @@
+{
+  "sectors": {
+    "Technology": {
+      "etf": "XLK",
+      "weight": 29.5,
+      "ytd": 18.2,
+      "momentum": 85
+    },
+    "Communication Services": {
+      "etf": "XLC",
+      "weight": 8.8,
+      "ytd": 15.3,
+      "momentum": 78
+    },
+    "Financial": {
+      "etf": "XLF",
+      "weight": 13.2,
+      "ytd": 12.4,
+      "momentum": 70
+    },
+    "Industrials": {
+      "etf": "XLI",
+      "weight": 8.8,
+      "ytd": 10.1,
+      "momentum": 62
+    },
+    "Consumer Cyclical": {
+      "etf": "XLY",
+      "weight": 10.5,
+      "ytd": 8.7,
+      "momentum": 55
+    },
+    "Materials": {
+      "etf": "XLB",
+      "weight": 2.5,
+      "ytd": 6.8,
+      "momentum": 48
+    },
+    "Healthcare": {
+      "etf": "XLV",
+      "weight": 12.8,
+      "ytd": 5.1,
+      "momentum": 45
+    },
+    "Consumer Defensive": {
+      "etf": "XLP",
+      "weight": 6.5,
+      "ytd": 2.3,
+      "momentum": 35
+    },
+    "Utilities": {
+      "etf": "XLU",
+      "weight": 2.8,
+      "ytd": 1.5,
+      "momentum": 30
+    },
+    "Energy": {
+      "etf": "XLE",
+      "weight": 4.2,
+      "ytd": -5.3,
+      "momentum": 25
+    },
+    "Real Estate": {
+      "etf": "XLRE",
+      "weight": 2.4,
+      "ytd": -2.1,
+      "momentum": 20
+    }
+  },
+  "leading_sectors": [
+    "Technology",
+    "Communication Services",
+    "Financial"
+  ],
+  "lagging_sectors": [
+    "Utilities",
+    "Energy",
+    "Real Estate"
+  ],
+  "rotation_signal": "risk_on",
+  "recommendation": "Overweight Technology and Communication Services, Underweight Utilities"
+}

@@ -1,0 +1,9 @@
+{
+  "vix_current": 22.5,
+  "vix_average": 18.33,
+  "percentile": 83.3,
+  "regime": "elevated",
+  "term_structure": "backwardation",
+  "recommendation": "neutral",
+  "mean_reversion_expected": false
+}

@@ -1,0 +1,66 @@
+# === Secrets / credentials — never commit ===
+.env
+*.env
+*.key
+*.pem
+*.p12
+*token*
+*secret*
+config/composio.env
+**/composio.env
+
+# === Model weights / binaries — large, downloadable via scripts ===
+*.gguf
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+runtime/models/
+runtime/llama/
+elysia-android/app/src/main/assets/model/
+
+# === Build artifacts / dependencies ===
+*.exe
+dist/
+node_modules/
+.gradle/
+**/build/
+__pycache__/
+*.pyc
+*.pyo
+*.o
+*.so
+target/
+
+# === Databases / large generated data ===
+*.sqlite
+*.sqlite-journal
+*.db
+TASKS.md
+taskboard.sqlite
+
+# === Logs / runtime state ===
+*.log
+logs/
+**/logs/
+orchestrator/logs/
+orchestrator/__pycache__/
+workspace/videos/
+workspace/*.db
+workspace/*.log
+workspace/.web_cache/
+workspace/cache/
+workspace/agents/
+workspace/repos/
+.elysia/
+tmp/
+temp/
+
+# === Local IDE / OS / Android local config ===
+.DS_Store
+.idea/
+.vscode/
+*.iml
+elysia-android/local.properties
+elysia-android/.gradle/

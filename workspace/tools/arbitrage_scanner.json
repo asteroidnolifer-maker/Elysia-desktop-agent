@@ -1,0 +1,22 @@
+[
+  {
+    "symbol": "SOL",
+    "buy_exchange": "Kraken",
+    "buy_price": 98.1,
+    "sell_exchange": "Coinbase",
+    "sell_price": 99.2,
+    "spread": 1.1,
+    "spread_pct": 1.12,
+    "estimated_profit_per_1000": 11.21
+  },
+  {
+    "symbol": "ETH",
+    "buy_exchange": "Kraken",
+    "buy_price": 2270.4,
+    "sell_exchange": "Coinbase",
+    "sell_price": 2295.1,
+    "spread": 24.7,
+    "spread_pct": 1.09,
+    "estimated_profit_per_1000": 10.88
+  }
+]

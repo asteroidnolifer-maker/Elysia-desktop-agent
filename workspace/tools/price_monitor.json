@@ -1,0 +1,78 @@
+{
+  "products_monitored": 10,
+  "alerts": [
+    {
+      "product": "Product 0",
+      "previous": 33.51,
+      "current": 47.86,
+      "change_pct": 42.8,
+      "alert_type": "price_increase",
+      "action": "review_pricing"
+    },
+    {
+      "product": "Product 1",
+      "previous": 15.99,
+      "current": 17.67,
+      "change_pct": 10.5,
+      "alert_type": "price_increase",
+      "action": "review_pricing"
+    },
+    {
+      "product": "Product 2",
+      "previous": 37.23,
+      "current": 17.37,
+      "change_pct": -53.3,
+      "alert_type": "price_drop",
+      "action": "match_price"
+    },
+    {
+      "product": "Product 3",
+      "previous": 39.07,
+      "current": 25.56,
+      "change_pct": -34.6,
+      "alert_type": "price_drop",
+      "action": "match_price"
+    },
+    {
+      "product": "Product 4",
+      "previous": 46.9,
+      "current": 43.91,
+      "change_pct": -6.4,
+      "alert_type": "price_drop",
+      "action": "match_price"
+    },
+    {
+      "product": "Product 5",
+      "previous": 21.33,
+      "current": 25.81,
+      "change_pct": 21.0,
+      "alert_type": "price_increase",
+      "action": "review_pricing"
+    },
+    {
+      "product": "Product 6",
+      "previous": 37.2,
+      "current": 24.84,
+      "change_pct": -33.2,
+      "alert_type": "price_drop",
+      "action": "match_price"
+    },
+    {
+      "product": "Product 8",
+      "previous": 12.29,
+      "current": 47.99,
+      "change_pct": 290.5,
+      "alert_type": "price_increase",
+      "action": "review_pricing"
+    },
+    {
+      "product": "Product 9",
+      "previous": 33.04,
+      "current": 39.81,
+      "change_pct": 20.5,
+      "alert_type": "price_increase",
+      "action": "review_pricing"
+    }
+  ],
+  "alert_count": 9
+}

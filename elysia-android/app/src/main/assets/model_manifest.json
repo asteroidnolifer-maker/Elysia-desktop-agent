@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "elysia-light-128.onnx",
+      "name": "Elysia ULTRA_LIGHT",
+      "version": "0.4.0",
+      "sizeBytes": 1453767,
+      "sha256": "81edb1694cbcf30868b9480626eca5f32ca72dca6aef177bc8c8b69c448ac15e",
+      "url": "file:///asset",
+      "quantization": "float32",
+      "ramRequirementMb": 256,
+      "deviceClassMin": "VERY_LOW",
+      "profile": "ULTRA_LIGHT",
+      "description": "Tiny fixed-window character model, trained and bundled with the APK. Runs offline on very low-RAM phones."
+    }
+  ]
+}

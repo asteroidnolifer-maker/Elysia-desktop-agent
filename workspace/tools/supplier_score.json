@@ -1,0 +1,11 @@
+{
+  "scores": {
+    "communication": 22.5,
+    "shipping": 23.8,
+    "quality": 21.2,
+    "pricing": 20.0
+  },
+  "total": 87.5,
+  "grade": "A",
+  "recommendation": "reliable"
+}

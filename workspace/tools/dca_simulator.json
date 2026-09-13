@@ -1,0 +1,250 @@
+{
+  "total_invested": 12000,
+  "total_shares": 115.3557,
+  "final_value": 12560.37,
+  "total_return": 560.37,
+  "return_pct": 4.67,
+  "avg_cost_per_share": 104.03,
+  "history": [
+    {
+      "month": 1,
+      "price": 118.29,
+      "shares_bought": 4.227,
+      "total_shares": 4.227,
+      "total_invested": 500,
+      "portfolio_value": 500.0,
+      "avg_cost": 118.29,
+      "gain_loss_pct": -0.0
+    },
+    {
+      "month": 2,
+      "price": 109.49,
+      "shares_bought": 4.5666,
+      "total_shares": 8.7936,
+      "total_invested": 1000,
+      "portfolio_value": 962.81,
+      "avg_cost": 113.72,
+      "gain_loss_pct": -3.72
+    },
+    {
+      "month": 3,
+      "price": 119.88,
+      "shares_bought": 4.1707,
+      "total_shares": 12.9643,
+      "total_invested": 1500,
+      "portfolio_value": 1554.21,
+      "avg_cost": 115.7,
+      "gain_loss_pct": 3.61
+    },
+    {
+      "month": 4,
+      "price": 95.95,
+      "shares_bought": 5.2113,
+      "total_shares": 18.1756,
+      "total_invested": 2000,
+      "portfolio_value": 1743.87,
+      "avg_cost": 110.04,
+      "gain_loss_pct": -12.81
+    },
+    {
+      "month": 5,
+      "price": 116.91,
+      "shares_bought": 4.2767,
+      "total_shares": 22.4523,
+      "total_invested": 2500,
+      "portfolio_value": 2624.95,
+      "avg_cost": 111.35,
+      "gain_loss_pct": 5.0
+    },
+    {
+      "month": 6,
+      "price": 123.13,
+      "shares_bought": 4.0606,
+      "total_shares": 26.5129,
+      "total_invested": 3000,
+      "portfolio_value": 3264.66,
+      "avg_cost": 113.15,
+      "gain_loss_pct": 8.82
+    },
+    {
+      "month": 7,
+      "price": 81.08,
+      "shares_bought": 6.1668,
+      "total_shares": 32.6798,
+      "total_invested": 3500,
+      "portfolio_value": 2649.65,
+      "avg_cost": 107.1,
+      "gain_loss_pct": -24.3
+    },
+    {
+      "month": 8,
+      "price": 92.74,
+      "shares_bought": 5.3915,
+      "total_shares": 38.0713,
+      "total_invested": 4000,
+      "portfolio_value": 3530.66,
+      "avg_cost": 105.07,
+      "gain_loss_pct": -11.73
+    },
+    {
+      "month": 9,
+      "price": 107.53,
+      "shares_bought": 4.6498,
+      "total_shares": 42.7211,
+      "total_invested": 4500,
+      "portfolio_value": 4593.83,
+      "avg_cost": 105.33,
+      "gain_loss_pct": 2.09
+    },
+    {
+      "month": 10,
+      "price": 96.75,
+      "shares_bought": 5.1677,
+      "total_shares": 47.8888,
+      "total_invested": 5000,
+      "portfolio_value": 4633.47,
+      "avg_cost": 104.41,
+      "gain_loss_pct": -7.33
+    },
+    {
+      "month": 11,
+      "price": 101.86,
+      "shares_bought": 4.9085,
+      "total_shares": 52.7973,
+      "total_invested": 5500,
+      "portfolio_value": 5378.16,
+      "avg_cost": 104.17,
+      "gain_loss_pct": -2.22
+    },
+    {
+      "month": 12,
+      "price": 87.69,
+      "shares_bought": 5.7019,
+      "total_shares": 58.4993,
+      "total_invested": 6000,
+      "portfolio_value": 5129.78,
+      "avg_cost": 102.57,
+      "gain_loss_pct": -14.5
+    },
+    {
+      "month": 13,
+      "price": 91.99,
+      "shares_bought": 5.4352,
+      "total_shares": 63.9344,
+      "total_invested": 6500,
+      "portfolio_value": 5881.54,
+      "avg_cost": 101.67,
+      "gain_loss_pct": -9.51
+    },
+    {
+      "month": 14,
+      "price": 116.08,
+      "shares_bought": 4.3075,
+      "total_shares": 68.2419,
+      "total_invested": 7000,
+      "portfolio_value": 7921.34,
+      "avg_cost": 102.58,
+      "gain_loss_pct": 13.16
+    },
+    {
+      "month": 15,
+      "price": 94.8,
+      "shares_bought": 5.2741,
+      "total_shares": 73.516,
+      "total_invested": 7500,
+      "portfolio_value": 6969.5,
+      "avg_cost": 102.02,
+      "gain_loss_pct": -7.07
+    },
+    {
+      "month": 16,
+      "price": 105.0,
+      "shares_bought": 4.7618,
+      "total_shares": 78.2779,
+      "total_invested": 8000,
+      "portfolio_value": 8219.34,
+      "avg_cost": 102.2,
+      "gain_loss_pct": 2.74
+    },
+    {
+      "month": 17,
+      "price": 121.72,
+      "shares_bought": 4.1077,
+      "total_shares": 82.3856,
+      "total_invested": 8500,
+      "portfolio_value": 10028.09,
+      "avg_cost": 103.17,
+      "gain_loss_pct": 17.98
+    },
+    {
+      "month": 18,
+      "price": 96.44,
+      "shares_bought": 5.1845,
+      "total_shares": 87.5701,
+      "total_invested": 9000,
+      "portfolio_value": 8445.36,
+      "avg_cost": 102.77,
+      "gain_loss_pct": -6.16
+    },
+    {
+      "month": 19,
+      "price": 125.17,
+      "shares_bought": 3.9946,
+      "total_shares": 91.5647,
+      "total_invested": 9500,
+      "portfolio_value": 11461.2,
+      "avg_cost": 103.75,
+      "gain_loss_pct": 20.64
+    },
+    {
+      "month": 20,
+      "price": 106.94,
+      "shares_bought": 4.6755,
+      "total_shares": 96.2401,
+      "total_invested": 10000,
+      "portfolio_value": 10292.0,
+      "avg_cost": 103.91,
+      "gain_loss_pct": 2.92
+    },
+    {
+      "month": 21,
+      "price": 83.4,
+      "shares_bought": 5.9948,
+      "total_shares": 102.235,
+      "total_invested": 10500,
+      "portfolio_value": 8526.91,
+      "avg_cost": 102.7,
+      "gain_loss_pct": -18.79
+    },
+    {
+      "month": 22,
+      "price": 116.79,
+      "shares_bought": 4.2813,
+      "total_shares": 106.5163,
+      "total_invested": 11000,
+      "portfolio_value": 12439.78,
+      "avg_cost": 103.27,
+      "gain_loss_pct": 13.09
+    },
+    {
+      "month": 23,
+      "price": 117.72,
+      "shares_bought": 4.2474,
+      "total_shares": 110.7636,
+      "total_invested": 11500,
+      "portfolio_value": 13039.05,
+      "avg_cost": 103.82,
+      "gain_loss_pct": 13.38
+    },
+    {
+      "month": 24,
+      "price": 108.88,
+      "shares_bought": 4.592,
+      "total_shares": 115.3557,
+      "total_invested": 12000,
+      "portfolio_value": 12560.37,
+      "avg_cost": 104.03,
+      "gain_loss_pct": 4.67
+    }
+  ]
+}

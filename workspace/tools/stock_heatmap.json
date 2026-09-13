@@ -1,0 +1,282 @@
+[
+  {
+    "symbol": "AAPL",
+    "sector": "Technology",
+    "change_pct": -2.47,
+    "market_cap_b": 608.3,
+    "color": "#42bd80"
+  },
+  {
+    "symbol": "MSFT",
+    "sector": "Technology",
+    "change_pct": -0.13,
+    "market_cap_b": 2554.3,
+    "color": "#7c8380"
+  },
+  {
+    "symbol": "GOOGL",
+    "sector": "Technology",
+    "change_pct": -1.55,
+    "market_cap_b": 2976.7,
+    "color": "#59a680"
+  },
+  {
+    "symbol": "NVDA",
+    "sector": "Technology",
+    "change_pct": -0.34,
+    "market_cap_b": 918.4,
+    "color": "#778880"
+  },
+  {
+    "symbol": "META",
+    "sector": "Technology",
+    "change_pct": -1.9,
+    "market_cap_b": 1604.8,
+    "color": "#50af80"
+  },
+  {
+    "symbol": "AVGO",
+    "sector": "Technology",
+    "change_pct": -2.39,
+    "market_cap_b": 139.6,
+    "color": "#44bb80"
+  },
+  {
+    "symbol": "CRM",
+    "sector": "Technology",
+    "change_pct": -3.05,
+    "market_cap_b": 301.1,
+    "color": "#33cc80"
+  },
+  {
+    "symbol": "AMD",
+    "sector": "Technology",
+    "change_pct": 1.77,
+    "market_cap_b": 2053.7,
+    "color": "#ac5380"
+  },
+  {
+    "symbol": "UNH",
+    "sector": "Healthcare",
+    "change_pct": -1.69,
+    "market_cap_b": 1305.4,
+    "color": "#55aa80"
+  },
+  {
+    "symbol": "JNJ",
+    "sector": "Healthcare",
+    "change_pct": -2.15,
+    "market_cap_b": 202.7,
+    "color": "#4ab580"
+  },
+  {
+    "symbol": "LLY",
+    "sector": "Healthcare",
+    "change_pct": 3.63,
+    "market_cap_b": 978.0,
+    "color": "#da2580"
+  },
+  {
+    "symbol": "PFE",
+    "sector": "Healthcare",
+    "change_pct": 3.6,
+    "market_cap_b": 405.3,
+    "color": "#d92680"
+  },
+  {
+    "symbol": "ABBV",
+    "sector": "Healthcare",
+    "change_pct": 0.41,
+    "market_cap_b": 1081.6,
+    "color": "#8a7580"
+  },
+  {
+    "symbol": "MRK",
+    "sector": "Healthcare",
+    "change_pct": 0.48,
+    "market_cap_b": 198.5,
+    "color": "#8c7380"
+  },
+  {
+    "symbol": "TMO",
+    "sector": "Healthcare",
+    "change_pct": -2.63,
+    "market_cap_b": 2205.8,
+    "color": "#3ec180"
+  },
+  {
+    "symbol": "ABT",
+    "sector": "Healthcare",
+    "change_pct": -2.77,
+    "market_cap_b": 2346.4,
+    "color": "#3ac580"
+  },
+  {
+    "symbol": "JPM",
+    "sector": "Financial",
+    "change_pct": -3.95,
+    "market_cap_b": 1613.4,
+    "color": "#1de280"
+  },
+  {
+    "symbol": "V",
+    "sector": "Financial",
+    "change_pct": -0.6,
+    "market_cap_b": 1825.3,
+    "color": "#718e80"
+  },
+  {
+    "symbol": "MA",
+    "sector": "Financial",
+    "change_pct": -0.74,
+    "market_cap_b": 1104.4,
+    "color": "#6d9280"
+  },
+  {
+    "symbol": "BAC",
+    "sector": "Financial",
+    "change_pct": 0.73,
+    "market_cap_b": 404.3,
+    "color": "#926d80"
+  },
+  {
+    "symbol": "WFC",
+    "sector": "Financial",
+    "change_pct": -0.35,
+    "market_cap_b": 640.8,
+    "color": "#778880"
+  },
+  {
+    "symbol": "GS",
+    "sector": "Financial",
+    "change_pct": -3.12,
+    "market_cap_b": 1350.9,
+    "color": "#31ce80"
+  },
+  {
+    "symbol": "MS",
+    "sector": "Financial",
+    "change_pct": -3.39,
+    "market_cap_b": 2581.6,
+    "color": "#2bd480"
+  },
+  {
+    "symbol": "BLK",
+    "sector": "Financial",
+    "change_pct": 3.7,
+    "market_cap_b": 1540.5,
+    "color": "#dc2380"
+  },
+  {
+    "symbol": "AMZN",
+    "sector": "Consumer",
+    "change_pct": 0.85,
+    "market_cap_b": 2127.7,
+    "color": "#956a80"
+  },
+  {
+    "symbol": "TSLA",
+    "sector": "Consumer",
+    "change_pct": -0.89,
+    "market_cap_b": 1684.3,
+    "color": "#699680"
+  },
+  {
+    "symbol": "HD",
+    "sector": "Consumer",
+    "change_pct": 3.78,
+    "market_cap_b": 687.5,
+    "color": "#de2180"
+  },
+  {
+    "symbol": "MCD",
+    "sector": "Consumer",
+    "change_pct": -0.88,
+    "market_cap_b": 661.3,
+    "color": "#699680"
+  },
+  {
+    "symbol": "NKE",
+    "sector": "Consumer",
+    "change_pct": 4.53,
+    "market_cap_b": 613.5,
+    "color": "#f10e80"
+  },
+  {
+    "symbol": "SBUX",
+    "sector": "Consumer",
+    "change_pct": 2.26,
+    "market_cap_b": 1943.0,
+    "color": "#b84780"
+  },
+  {
+    "symbol": "TGT",
+    "sector": "Consumer",
+    "change_pct": -3.92,
+    "market_cap_b": 2948.8,
+    "color": "#1ee180"
+  },
+  {
+    "symbol": "LOW",
+    "sector": "Consumer",
+    "change_pct": 3.86,
+    "market_cap_b": 2514.1,
+    "color": "#e01f80"
+  },
+  {
+    "symbol": "XOM",
+    "sector": "Energy",
+    "change_pct": 2.02,
+    "market_cap_b": 235.8,
+    "color": "#b24d80"
+  },
+  {
+    "symbol": "CVX",
+    "sector": "Energy",
+    "change_pct": -2.28,
+    "market_cap_b": 1166.1,
+    "color": "#46b980"
+  },
+  {
+    "symbol": "COP",
+    "sector": "Energy",
+    "change_pct": 2.17,
+    "market_cap_b": 976.0,
+    "color": "#b64980"
+  },
+  {
+    "symbol": "EOG",
+    "sector": "Energy",
+    "change_pct": -3.94,
+    "market_cap_b": 637.4,
+    "color": "#1de280"
+  },
+  {
+    "symbol": "SLB",
+    "sector": "Energy",
+    "change_pct": -1.22,
+    "market_cap_b": 2087.0,
+    "color": "#619e80"
+  },
+  {
+    "symbol": "MPC",
+    "sector": "Energy",
+    "change_pct": -2.62,
+    "market_cap_b": 2774.9,
+    "color": "#3ec180"
+  },
+  {
+    "symbol": "PSX",
+    "sector": "Energy",
+    "change_pct": 0.24,
+    "market_cap_b": 650.2,
+    "color": "#867980"
+  },
+  {
+    "symbol": "VLO",
+    "sector": "Energy",
+    "change_pct": -3.78,
+    "market_cap_b": 2434.1,
+    "color": "#21de80"
+  }
+]
