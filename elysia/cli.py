@@ -15,7 +15,14 @@ Usage:
     elysia task retry <id>
     elysia task pause|resume <id>
     elysia workers
-    elysia providers
+    elysia providers [--catalog]
+    elysia login <provider> [--paste KEY] [--no-browser]
+    elysia login --status | --load | --logout <provider>
+    elysia hf models|datasets
+    elysia hf model <repo>
+    elysia hf recommend [available_mb]
+    elysia knowledge list|search|show <query>
+    elysia prompt [style]        (claude-code, hermes, openhands, research, elysia)
     elysia cost
     elysia resources
     elysia agents [role]
@@ -190,6 +197,17 @@ def cmd_workers(_args):
 
 
 def cmd_providers(args):
+    if getattr(args, "catalog", False):
+        from elysia.core.provider_presets import describe
+        print(f"{'provider':<16} {'kind':<7} {'ready':<6} model / what is missing")
+        for row in describe():
+            state = "yes" if row["ready"] else "no"
+            detail = row["model"] if row["ready"] else "; ".join(row["missing"])
+            print(f"{row['name']:<16} {row['kind']:<7} {state:<6} {detail}")
+        print("\nactivate a cloud provider: elysia login <name>")
+        print("cli agents reuse the login of their installed binary "
+              "(claude, codex, gemini, opencode, openclaw)")
+        return 0
     cfg = load_config()
     from elysia.core.providers import ProviderManager
     pm = ProviderManager()
@@ -204,6 +222,129 @@ def cmd_providers(args):
             print(f"   last_error: {cp['last_error'][:100]}")
     total = pm.usage_totals()
     print("\nestimated totals:", json.dumps(total, indent=1))
+    return 0
+
+
+# -- login (desktop-browser provider setup) ---------------------------------
+def cmd_login(args):
+    from elysia.core import browser_login
+    if args.load:
+        n = browser_login.load_env_file()
+        print(f"loaded {n} credential(s) from {browser_login.ENV_FILE}")
+        return 0
+    if args.status:
+        st = browser_login.stored_status()
+        from elysia.core.provider_presets import describe
+        env_ready = [row["name"] for row in describe() if row["ready"]]
+        print("stored keys:", json.dumps(st["stored"], indent=1) if st["stored"]
+              else f"none ({st['path']})")
+        print("active providers:", ", ".join(env_ready) or "(local only)")
+        return 0
+    if args.logout:
+        from elysia.core.provider_presets import CATALOG
+        entry = CATALOG.get(args.provider or "")
+        if not entry:
+            print("unknown provider; see elysia providers --catalog")
+            return 1
+        removed_any = False
+        for v in entry.get("env", ()) or ():
+            if browser_login.remove_key(v):
+                removed_any = True
+        print(f"removed stored key(s) for {args.provider}" if removed_any
+              else f"no stored key for {args.provider}")
+        return 0
+    if not args.provider:
+        print("usage: elysia login <provider> [--paste KEY] [--no-browser]")
+        print("       elysia login --status | --load | --logout <provider>")
+        return 1
+    res = browser_login.login(args.provider, paste_value=args.paste or None,
+                              no_browser=args.no_browser)
+    if res.get("url"):
+        print("page:", res["url"])
+    print("browser:  ", "opened" if res.get("opened") else
+          "not opened (open the URL above manually)")
+    print(res.get("message", ""))
+    return 0 if res.get("ok") else 1
+
+
+# -- huggingface --------------------------------------------------------------
+def cmd_hf(args):
+    from elysia.core import hf as hf_mod
+    if args.action == "models":
+        for m in [{"name": n, **m} for n, m in sorted(hf_mod.MODELS.items())]:
+            print(f"{m['name']:<24} ~{m['size_mb']:>5}MB  "
+                  f"[{','.join(m['capabilities'])}] {m['note']}")
+            print(f"{'':<24} gguf: hf.co/{m['gguf']} ({m['file_hint']})")
+        return 0
+    if args.action == "datasets":
+        for d in [ {"name": n, **d} for n, d in sorted(hf_mod.DATASETS.items())]:
+            print(f"{d['name']:<24} [{d['task']:<11}] {d['note']}")
+            print(f"{'':<24} {d['url']}")
+        return 0
+    if args.action == "model":
+        info = hf_mod.resolve(args.repo)
+        if not info.get("ok"):
+            print(f"could not resolve {args.repo}: {info.get('error', 'offline')}")
+            return 1
+        print(json.dumps({k: v for k, v in info.items() if k != "ok"},
+                         indent=1))
+        return 0
+    if args.action == "recommend":
+        try:
+            avail = int(args.repo)
+        except (TypeError, ValueError):
+            avail = 4000
+        name = hf_mod.recommend(avail)
+        m = hf_mod.MODELS[name]
+        print(f"{name} (~{m['size_mb']}MB) — {m['note']}")
+        print(f"gguf: hf.co/{m['gguf']}")
+        return 0
+    print("usage: elysia hf models|datasets|model <repo>|recommend <avail_mb>")
+    return 1
+
+
+# -- knowledge (vendored security-tooling docs) --------------------------------
+def cmd_knowledge(args):
+    from elysia.core import knowledge as kb
+    if args.action == "list":
+        st = kb.stats()
+        print(f"knowledge base: {st['entries']} entries in {st['dir']}")
+        for cat, n in sorted(st["categories"].items()):
+            print(f"  {cat:<20} {n}")
+        return 0
+    if args.action == "search":
+        q = args.query or ""
+        hits = kb.search(q)
+        if not hits:
+            print("no matches")
+            return 0
+        for h in hits:
+            print(f"{h['name']:<16} [{h['category']}] risk={h['risk']} "
+                  f"score={h['score']}")
+            print(f"  {h['purpose'][:100]}")
+        return 0
+    if args.action == "show":
+        hits = kb.search(args.query or "", limit=1)
+        if not hits:
+            print("no matches")
+            return 1
+        print(kb.for_context(args.query, max_entries=1))
+        return 0
+    return 1
+
+
+# -- prompt styles -------------------------------------------------------------
+def cmd_prompt(args):
+    from elysia.core.prompts import get_style, list_styles, system_prompt
+    if args.style_name:
+        print(system_prompt(args.style_name))
+        return 0
+    active = get_style()
+    for row in list_styles():
+        mark = "*" if row["active"] else " "
+        print(f"{mark} {row['name']:<14} {row['description']}")
+    print(f"\nactive: {os.environ.get('ELYSIA_PROMPT_STYLE', 'elysia')} "
+          f"(set ELYSIA_PROMPT_STYLE or pass --style)")
     return 0
 
 
@@ -483,7 +624,37 @@ def build_parser() -> argparse.ArgumentParser:
     task.add_argument("--template")
     task.add_argument("--dedup", action="store_true")
 
-    sub.add_parser("providers")
+    pr = sub.add_parser("providers")
+    pr.add_argument("--catalog", action="store_true",
+                    help="show the full provider preset catalog and "
+                         "what each needs to activate")
+
+    lg = sub.add_parser("login", help="set up a provider from the desktop "
+                                      "browser")
+    lg.add_argument("provider", nargs="?")
+    lg.add_argument("--status", action="store_true",
+                    help="show stored keys (no secrets) + active providers")
+    lg.add_argument("--load", action="store_true",
+                    help="load stored keys into this process environment")
+    lg.add_argument("--logout", action="store_true",
+                    help="remove the provider's stored key")
+    lg.add_argument("--paste", default=None, metavar="KEY",
+                    help="store the key locally (config/providers.env, 0600)")
+    lg.add_argument("--no-browser", action="store_true")
+
+    hf = sub.add_parser("hf", help="huggingface models/datasets/inference")
+    hf.add_argument("action", choices=["models", "datasets", "model",
+                                        "recommend"])
+    hf.add_argument("repo", nargs="?", default=None)
+
+    kn = sub.add_parser("knowledge", help="vendored security-tooling docs "
+                                          "(defensive-first)")
+    kn.add_argument("action", choices=["list", "search", "show"])
+    kn.add_argument("query", nargs="?", default=None)
+
+    pt = sub.add_parser("prompt", help="system-prompt styles")
+    pt.add_argument("style_name", nargs="?", default=None)
+
     ag = sub.add_parser("agents")
     ag.add_argument("role", nargs="?", default=None)
     ag.add_argument("--prompt", default=None)
@@ -546,6 +717,8 @@ def main(argv=None) -> int:
         "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
         "doctor": cmd_doctor, "tasks": cmd_tasks, "task": cmd_task,
         "workers": cmd_workers, "providers": cmd_providers,
+        "login": cmd_login, "hf": cmd_hf, "knowledge": cmd_knowledge,
+        "prompt": cmd_prompt,
         "cost": cmd_cost, "resources": cmd_resources, "agents": cmd_agents,
         "research": cmd_research, "orx": cmd_orx, "template": cmd_template,
         "checkpoint": cmd_checkpoint, "checkpoints": cmd_checkpoints,

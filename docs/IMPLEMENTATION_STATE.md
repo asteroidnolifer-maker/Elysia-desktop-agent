@@ -3,6 +3,9 @@
 Status of the phased audit + rearchitecture. Phase 1 (audit) is complete;
 Phases 2–15 (foundation + migration) are complete and committed on the
 `rearchitecture` branch; Phase 16 (docs + verification) closes the loop.
+Phase 17 (hardening + feature expansion) and Phase 18 (provider ecosystem:
+presets, desktop login, prompt styles, security knowledge base, HuggingFace)
+are complete on `main` — see `checks.md` and `howtotest.md`.
 
 Companion docs:
 - `docs/ARCHITECTURE_AUDIT.md` — the full Phase 1 audit (findings, contradictions,

@@ -20,21 +20,32 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from elysia.core.config import load_config  # noqa: E402
+from elysia.core.prompts import get_style, system_prompt  # noqa: E402
 from elysia.core.qa import validate_file  # noqa: E402
 
 MODEL = os.environ.get("ELYSIA_MODEL", "qwen2.5-coder:7b")
 LLAMA_URL = os.environ.get("ELYSIA_LLM_URL", "http://127.0.0.1:11434/v1")
 
-SYSTEM_PROMPT = (
-    "You are a precise coding agent working offline. "
-    "When asked to create or edit files, output each file as a fenced code block "
-    "whose opening fence line ends with the file path, like:\n"
-    "```ts src/foo.ts\n"
-    "<full file content>\n"
-    "```\n"
-    "Output ONLY file blocks (plus at most one short sentence before them). "
-    "Never truncate content. No explanations after the blocks."
-)
+# The worker contract (byte-identical to the original contract; now the
+# "elysia" prompt style). Other styles: claude-code, hermes, openhands,
+# research — see elysia/core/prompts.py and `elysia prompt list`.
+SYSTEM_PROMPT = system_prompt("elysia")
+
+
+def chat_style(messages, style: str | None = None, max_tokens=2048,
+               temperature=0.2, timeout=900, provider=None):
+    """chat() with a prompt style injected as the system message.
+
+    ``style`` defaults to ELYSIA_PROMPT_STYLE (or the elysia contract).
+    ``messages`` should be role/content pairs WITHOUT a system message;
+    the style's system prompt is prepended automatically.
+    """
+    msgs = list(messages or [])
+    if msgs and msgs[0].get("role") == "system":
+        msgs = msgs[1:]
+    msgs.insert(0, {"role": "system", "content": system_prompt(style)})
+    return chat(msgs, max_tokens=max_tokens, temperature=temperature,
+                timeout=timeout, provider=provider)
 
 # fence with OPTIONAL path token after the language:
 #   ```md docs/x.md\n<body>```   (path in group 2)
@@ -167,9 +178,14 @@ def health():
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "ask"
     if cmd == "ask":
-        prompt = " ".join(sys.argv[2:]) or sys.stdin.read()
-        text, err = chat([{"role": "system", "content": SYSTEM_PROMPT},
-                          {"role": "user", "content": prompt}], max_tokens=1024)
+        args = sys.argv[2:]
+        style = None
+        if args and args[0] == "--style":
+            style = args[1]
+            args = args[2:]
+        prompt = " ".join(args) or sys.stdin.read()
+        text, err = chat_style([{"role": "user", "content": prompt}],
+                               style=style, max_tokens=1024)
         if err:
             print(f"[error] {err}", file=sys.stderr)
             sys.exit(1)

@@ -15,6 +15,12 @@ from unittest import mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "orchestrator")))
 
+# Hermetic + must precede `import server`: server.py builds its provider
+# manager at import time from load_config(), and credential-activated
+# presets (cloud keys, CLI agents on PATH) would change what this legacy
+# test asserts. Preset integration is covered by tests/test_providers_plus.py.
+os.environ["ELYSIA_DISABLE_PRESETS"] = "1"
+
 # Point server's DB at a temp location so tests never touch the real board.
 import tempfile
 

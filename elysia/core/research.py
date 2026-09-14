@@ -300,8 +300,9 @@ class ResearchEngine:
                   "into a structured report with an Executive Summary, Findings "
                   "(each citing [n] against the sources), and Next Steps. Do not "
                   "invent citations.")
+        spec_line = f"Format spec: {format_spec}\n" if format_spec else ""
         user = (f"Research question: {query}\n\n"
-                f"{('Format spec: ' + format_spec + '\\n') if format_spec else ''}"
+                f"{spec_line}"
                 f"Sources:\n{src_block}")
         text, err = self.exec_provider.execute(
             [{"role": "system", "content": system},

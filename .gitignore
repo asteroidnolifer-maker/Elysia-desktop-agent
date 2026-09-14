@@ -6,8 +6,9 @@
 *.p12
 *token*
 *secret*
-config/composio.env
+config/
 **/composio.env
+**/providers.env
 
 # === Model weights / binaries — large, downloadable via scripts ===
 *.gguf

@@ -215,8 +215,16 @@ def default_config() -> Config:
     return cfg
 
 
-def load_config(path: str | None = None, env: dict | None = None) -> Config:
-    """Load a JSON config on top of defaults."""
+def load_config(path: str | None = None, env: dict | None = None,
+                include_presets: bool = True) -> Config:
+    """Load a JSON config on top of defaults.
+
+    After the file loads, credential-activated provider presets (cloud APIs
+    via env keys, CLI agents via PATH) and the optional HF Inference provider
+    are appended to ``cfg.providers`` unless ``include_presets`` is False.
+    Repo-config providers always stay first (they win failover priority).
+    Set ``ELYSIA_DISABLE_PRESETS=1`` to load only the file's providers.
+    """
     if env:
         _apply_env(env)
     cfg = default_config()
@@ -230,6 +238,21 @@ def load_config(path: str | None = None, env: dict | None = None) -> Config:
             apply_dict(cfg, data)
         except (json.JSONDecodeError, OSError) as e:
             raise ValueError(f"invalid config {path}: {e}")
+    if include_presets and os.environ.get("ELYSIA_DISABLE_PRESETS", "") \
+            not in ("1", "true", "yes"):
+        try:
+            from .provider_presets import load_provider_configs, _pname
+            from .hf import inference_provider
+            seen = {_pname(p) for p in cfg.providers}
+            for p in load_provider_configs():
+                if _pname(p) not in seen:
+                    cfg.providers.append(p)
+                    seen.add(_pname(p))
+            hf = inference_provider()
+            if hf is not None and _pname(hf) not in seen:
+                cfg.providers.append(hf)
+        except Exception:  # noqa: BLE001 — presets must never break config load
+            pass
     return cfg
 
 

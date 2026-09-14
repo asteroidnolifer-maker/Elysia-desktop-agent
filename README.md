@@ -12,8 +12,9 @@ and workers all run on `127.0.0.1`.
 | `agent-core/` | Go daemon (default listen `:8085`). HTTP API + sandbox + thermal/power managers. Build with `go build`. Config: `agent-core/agent_config.json`. |
 | `orchestrator/` | Python control layer (stdlib only). `server.py` HUD + JSON API (default `--port 8087`), `adaptive.sh` worker pool, `worker_local.py` agents, `taskboard.py` (canonical `elysia.core.tasks` store), `brain.py` / `ask.sh` LLM chat (multi-provider), `airllm.py` model launcher, `monitor.py`, `hud.html`. |
 | `elysia/` | Rearchitected core package: `core/config.py`, `core/paths.py` (secure path resolution), `core/providers.py`, `core/tasks.py`, `core/scheduler.py`, `core/qa.py`, `core/events.py`, `core/git.py`, `core/workspace.py` + more. `elysia/config.json` is the single source of configuration. |
-| `docs/` | `ARCHITECTURE_AUDIT.md` (Phase 1 audit), `ARCHITECTURE.md` (target architecture), `IMPLEMENTATION_STATE.md` (status of the rearchitecture). |
-| `tests/` | `python3 -m unittest discover -s tests` — 29 unit tests (paths/security, providers, scheduler, QA, redaction, worker write security). |
+| Provider ecosystem | `core/provider_presets.py` — one catalog: local llama.cpp/Ollama, cloud OpenAI-compatible APIs (OpenRouter, Groq, Together, DeepSeek, Mistral, xAI, NVIDIA NIM, GitHub Models, Cerebras, Gemini, HuggingFace, Freebuff-style gateways) and CLI coding agents (Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw). A preset activates only when its credential env var is set (API) or its binary is on PATH (CLI). `core/browser_login.py` — `elysia login <provider>` opens the provider's console in the desktop browser and stores keys in `config/providers.env` (0600, git-ignored). |
+| `docs/` | `ARCHITECTURE_AUDIT.md` (Phase 1 audit), `ARCHITECTURE.md` (target architecture), `IMPLEMENTATION_STATE.md` (status of the rearchitecture), `knowledge/kali-tools/` (vendored defensive-first security-tooling docs, indexed by `elysia.core.knowledge`), `security/SECURITY_TOOLING.md` (tooling policy). |
+| `tests/` | `python3 -m unittest discover -s tests` — 118 unit tests (paths/security, providers, scheduler, QA, redaction, worker write security, features bundle, server API, provider presets/login/knowledge/HF). |
 | `runtime/` | Local inference runtime (**not committed**: binaries/models). `restore-model.sh` downloads `llama-server` + Qwen GGUF into `runtime/llama/` + `runtime/models/`. |
 | `elysia-android/` | Android app (Gradle, AGP `8.13.2`, Kotlin `2.2.21`). Modules: `:app`, `:core`, `:device`, `:installer`, `:runtime`, `:models`, `:diagnostics`, `:permissions`. |
 | `workspace/` | Generated projects, `tools/` scripts, `docs/` notes. `workspace/repos/` (cloned test projects), `*.db`, `*.log`, `cache/` are git-ignored. |
@@ -162,8 +163,27 @@ bash orchestrator/adaptive.sh down
 
 # one-shot chat with the local model (no third-party AI)
 python3 orchestrator/brain.py ask "say hi in one line"
+# same loop with a different operating style:
+python3 orchestrator/brain.py ask --style claude-code "plan a refactor in 3 bullets"
 bash orchestrator/ask.sh "list files in workspace"
 ```
+
+### Provider ecosystem (optional — local model always works)
+
+```bash
+./bin/elysia providers --catalog          # every backend + what it needs
+./bin/elysia login groq --no-browser      # opens the console URL in your browser
+./bin/elysia login groq --paste <KEY>     # stores the key (config/providers.env, 0600)
+./bin/elysia hf models                    # curated top open models (GGUF for runtime/)
+./bin/elysia knowledge search "port scanner"   # vendored defensive security docs
+./bin/elysia prompt                       # system-prompt styles (claude-code, hermes, ...)
+```
+
+Activation is credential-gated: a cloud preset joins the runtime provider
+set only when its env key is set; a CLI-agent preset (claude/codex/gemini/
+opencode/openclaw) only when its binary is on PATH (it reuses that tool's own
+login — Elysia never stores those credentials). See `howtotest.md` and
+`docs/security/SECURITY_TOOLING.md`.
 
 Flow: `POST /api/ask {goal}` → local model splits the goal into file-owning subtasks
 (max `MAX_DIVISION = 6`, rules from `orchestrator/INSTRUCTIONS.md`) → rows in
