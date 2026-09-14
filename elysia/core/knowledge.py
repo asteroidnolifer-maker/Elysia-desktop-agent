@@ -1,7 +1,8 @@
-"""Kali / security tooling knowledge base for Elysia.
+"""Security & research tooling knowledge base for Elysia.
 
 Answers the agent's questions "which tool does X?" and "how do I use Y
-responsibly?" from curated, vendored docs in ``docs/knowledge/kali-tools/``.
+responsibly?" from curated, vendored docs in ``docs/knowledge/`` (domains:
+kali-tools, osint, web-security, forensics, reverse-engineering).
 
 Scope and stance (matches the repo's security posture):
   - DEFENSIVE-FIRST: descriptions emphasize legitimate, authorized use,
@@ -24,7 +25,7 @@ import re
 
 from .config import repo_root
 
-DOCS_DIR = os.path.join(repo_root(), "docs", "knowledge", "kali-tools")
+DOCS_DIR = os.path.join(repo_root(), "docs", "knowledge")
 MAX_QUERY_RESULTS = 5
 MAX_CONTEXT_ENTRIES = 4
 MAX_ENTRY_CHARS = 900
@@ -62,10 +63,15 @@ class Entry:
             v = [a.strip() for a in v.split(",") if a.strip()]
         return [str(a).lower() for a in (v or [])]
 
+    @property
+    def domain(self) -> str:
+        return str(self.meta.get("domain", "general"))
+
     def to_dict(self) -> dict:
         return {"name": self.name, "category": self.category,
                 "purpose": self.purpose, "package": self.package,
                 "risk": self.risk, "aliases": self.aliases,
+                "domain": self.domain,
                 "path": self.path, "body": self.body}
 
     def summary(self, limit: int = MAX_ENTRY_CHARS) -> str:
@@ -95,21 +101,26 @@ def _read_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def load_all(docs_dir: str = DOCS_DIR) -> list[Entry]:
-    """Load every vendored tool doc (bounded, offline, never raises)."""
+    """Load every vendored tool doc across all domains (bounded, offline)."""
     entries: list[Entry] = []
     if not os.path.isdir(docs_dir):
         return entries
-    for fn in sorted(os.listdir(docs_dir)):
-        if not fn.endswith(".md"):
+    for dp, _dn, fn in os.walk(docs_dir):
+        if os.path.basename(dp) == "__pycache__":
             continue
-        path = os.path.join(docs_dir, fn)
-        try:
-            text = open(path, encoding="utf-8", errors="replace").read()
-        except OSError:
-            continue
-        meta, body = _read_frontmatter(text)
-        name = str(meta.get("name") or fn[:-3])
-        entries.append(Entry(name=name, path=path, meta=meta, body=body))
+        for f in sorted(fn):
+            if not f.endswith(".md") or f == "README.md":
+                continue
+            path = os.path.join(dp, f)
+            try:
+                text = open(path, encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            meta, body = _read_frontmatter(text)
+            name = str(meta.get("name") or f[:-3])
+            # domain = the vendored subdirectory (kali-tools, osint, ...)
+            meta.setdefault("domain", os.path.basename(dp))
+            entries.append(Entry(name=name, path=path, meta=meta, body=body))
     return entries
 
 

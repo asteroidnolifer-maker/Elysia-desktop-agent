@@ -303,6 +303,83 @@ def cmd_hf(args):
     return 1
 
 
+# -- brief (Jarvis-style status fusion) -------------------------------------------
+def cmd_brief(args):
+    from elysia.core.briefing import brief
+    from elysia.core.config import load_config
+    from elysia.core.providers import ProviderManager
+    from elysia.core.tasks import TaskStore
+    import os
+    store = None
+    try:
+        db = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "orchestrator", "taskboard.sqlite")
+        if os.path.exists(db):
+            store = TaskStore(db)
+    except Exception:  # noqa: BLE001
+        store = None
+    pm = None
+    try:
+        cfg = load_config()
+        pm = ProviderManager()
+        if cfg.providers:
+            pm.register_many(cfg.providers)
+    except Exception:  # noqa: BLE001
+        pm = None
+    topic = getattr(args, "topic", None) or ""
+    report = brief(topic, store=store, providers=pm)
+    print(report["text"])
+    return 0 if report["ok"] else 1
+
+
+# -- tools (machine capability catalog) ------------------------------------------
+def cmd_tools(args):
+    from elysia.core import toolcatalog as tc
+    if getattr(args, "check", None):
+        r = tc.detect(args.check)
+        state = "INSTALLED" if r["installed"] else "not installed"
+        print(f"{r['name']}: {state}" + (f" ({r['path']})" if r.get("path") else ""))
+        print(f"  group: {r.get('group', '-')} | purpose: {r.get('purpose', '-')}")
+        if not r["installed"]:
+            doc = tc.knowledge_for(args.check)
+            if doc:
+                print("  knowledge:")
+                for line in doc.splitlines()[:6]:
+                    print("    " + line)
+            print("  install policy: operator-run only "
+                  "(docs/security/SECURITY_TOOLING.md)")
+        return 0
+    if getattr(args, "missing", False):
+        rows = [r for r in tc.scan() if not r["installed"]]
+        if not rows:
+            print("nothing missing — full catalog present")
+            return 0
+        print(f"{len(rows)} catalog tool(s) not on this machine:")
+        cur = None
+        for r in rows:
+            if r["group"] != cur:
+                cur = r["group"]
+                print(f"  [{cur}]")
+            print(f"    {r['name']:<14} {r['purpose']}")
+        return 0
+    s = tc.summary()
+    print(f"machine tool catalog: {s['installed']}/{s['total']} installed "
+          f"(groups: {', '.join(s['groups']) or '-'})")
+    if getattr(args, "group", None):
+        rows = [r for r in s["rows"]
+                if r["group"] == args.group]
+    else:
+        rows = s["rows"]
+    cur = None
+    for r in rows:
+        if not getattr(args, "group", None) and r["group"] != cur:
+            cur = r["group"]
+            print(f"  [{cur}]")
+        mark = "+" if r["installed"] else "-"
+        print(f"  {mark} {r['name']:<14} {r['purpose']}")
+    return 0
+
+
 # -- knowledge (vendored security-tooling docs) --------------------------------
 def cmd_knowledge(args):
     from elysia.core import knowledge as kb
@@ -652,6 +729,20 @@ def build_parser() -> argparse.ArgumentParser:
     kn.add_argument("action", choices=["list", "search", "show"])
     kn.add_argument("query", nargs="?", default=None)
 
+    tl = sub.add_parser("tools", help="machine tool catalog: what is installed "
+                                      "and what it can do")
+    tl.add_argument("--group", default=None,
+                    help="filter by group (security, osint, dev, network, ...)")
+    tl.add_argument("--check", default=None, metavar="TOOL",
+                    help="probe one tool and show its knowledge doc")
+    tl.add_argument("--missing", action="store_true",
+                    help="list catalog tools NOT installed (gap report)")
+
+    br = sub.add_parser("brief", help="Jarvis-style status briefing "
+                                      "(capabilities, board, providers)")
+    br.add_argument("topic", nargs="?", default=None,
+                    help="optional topic for a focused knowledge digest")
+
     pt = sub.add_parser("prompt", help="system-prompt styles")
     pt.add_argument("style_name", nargs="?", default=None)
 
@@ -718,7 +809,7 @@ def main(argv=None) -> int:
         "doctor": cmd_doctor, "tasks": cmd_tasks, "task": cmd_task,
         "workers": cmd_workers, "providers": cmd_providers,
         "login": cmd_login, "hf": cmd_hf, "knowledge": cmd_knowledge,
-        "prompt": cmd_prompt,
+        "prompt": cmd_prompt, "tools": cmd_tools, "brief": cmd_brief,
         "cost": cmd_cost, "resources": cmd_resources, "agents": cmd_agents,
         "research": cmd_research, "orx": cmd_orx, "template": cmd_template,
         "checkpoint": cmd_checkpoint, "checkpoints": cmd_checkpoints,

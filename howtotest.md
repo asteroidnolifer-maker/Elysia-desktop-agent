@@ -67,6 +67,12 @@ kill %1
 ./bin/elysia knowledge list        # vendored security-tooling knowledge stats
 ./bin/elysia knowledge search "port scanner"
 ./bin/elysia knowledge show nmap
+./bin/elysia tools                 # machine tool catalog: what's installed
+./bin/elysia tools --missing       # gap report: what's NOT installed
+./bin/elysia tools --check nmap    # probe one tool + its knowledge doc
+./bin/elysia brief                 # Jarvis-style briefing (caps+board+providers)
+./bin/elysia brief "memory forensics"   # briefing + focused knowledge digest
+./bin/elysia prompt jarvis         # the briefing-officer system prompt
 ```
 
 All of these must exit 0 with no traceback even with zero credentials and no

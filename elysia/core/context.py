@@ -31,13 +31,14 @@ class ContextBuilder:
         "memory": "",
         "history": "",
         "scratch": "",
+        "capabilities": "",
     }
 
     def __init__(self, budget_chars: int = 60000, layer_order=None):
         self.budget = budget_chars
         self.layers: dict[str, str] = dict(self.DEFAULTS)
         self.order = layer_order or ["system", "project", "task", "memory",
-                                     "history", "scratch"]
+                                     "history", "scratch", "capabilities"]
         # immutable layers are never compressed (system first)
         self.protected = {"system"}
 
