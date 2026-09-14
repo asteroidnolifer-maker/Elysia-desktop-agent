@@ -303,6 +303,22 @@ def cmd_hf(args):
     return 1
 
 
+# -- jarvis (one natural-language front door) --------------------------------------
+def cmd_jarvis(args):
+    from elysia.core.jarvis import classify, handle
+    text = args.request or ""
+    if not text:
+        print("usage: elysia jarvis "
+              "\"what's running?\" | \"which tool scans ports?\" | ...")
+        return 1
+    print(f"[route: {classify(text)}]", file=sys.stderr)
+    r = handle(text, deep=bool(getattr(args, "deep", False)))
+    print(r.get("text", ""))
+    if r.get("report_path"):
+        print("\n[report saved]", r["report_path"])
+    return 0 if r.get("ok") else 1
+
+
 # -- brief (Jarvis-style status fusion) -------------------------------------------
 def cmd_brief(args):
     from elysia.core.briefing import brief
@@ -743,6 +759,12 @@ def build_parser() -> argparse.ArgumentParser:
     br.add_argument("topic", nargs="?", default=None,
                     help="optional topic for a focused knowledge digest")
 
+    jv = sub.add_parser("jarvis", help="one natural-language front door: "
+                                       "routes to briefing/knowledge/research/goal")
+    jv.add_argument("request", nargs="?", default=None)
+    jv.add_argument("--deep", action="store_true",
+                    help="use the deep-research engine for research routes")
+
     pt = sub.add_parser("prompt", help="system-prompt styles")
     pt.add_argument("style_name", nargs="?", default=None)
 
@@ -810,6 +832,7 @@ def main(argv=None) -> int:
         "workers": cmd_workers, "providers": cmd_providers,
         "login": cmd_login, "hf": cmd_hf, "knowledge": cmd_knowledge,
         "prompt": cmd_prompt, "tools": cmd_tools, "brief": cmd_brief,
+        "jarvis": cmd_jarvis,
         "cost": cmd_cost, "resources": cmd_resources, "agents": cmd_agents,
         "research": cmd_research, "orx": cmd_orx, "template": cmd_template,
         "checkpoint": cmd_checkpoint, "checkpoints": cmd_checkpoints,

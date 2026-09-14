@@ -73,6 +73,9 @@ kill %1
 ./bin/elysia brief                 # Jarvis-style briefing (caps+board+providers)
 ./bin/elysia brief "memory forensics"   # briefing + focused knowledge digest
 ./bin/elysia prompt jarvis         # the briefing-officer system prompt
+./bin/elysia jarvis "what's running?"    # natural-language front door
+./bin/elysia jarvis "how do I scan my own server"   # -> knowledge route
+./bin/elysia jarvis --deep "latest llama.cpp features"  # -> deep research
 ```
 
 All of these must exit 0 with no traceback even with zero credentials and no

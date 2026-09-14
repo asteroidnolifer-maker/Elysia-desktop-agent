@@ -124,6 +124,15 @@ def load_all(docs_dir: str = DOCS_DIR) -> list[Entry]:
     return entries
 
 
+# Function words + the universal noun "tool" carry no signal for tool lookup;
+# without this filter a query like "which tool brews espresso" matches every
+# doc that merely contains the word "tool".
+_SEARCH_STOPWORDS = {"the", "and", "for", "with", "which", "what", "how",
+                     "when", "where", "should", "could", "does", "did",
+                     "from", "that", "this", "into", "about", "tool",
+                     "tools", "use", "used", "using", "your", "you", "own"}
+
+
 def search(query: str, entries: list[Entry] | None = None,
            limit: int = MAX_QUERY_RESULTS) -> list[dict]:
     """Keyword-scored search over the knowledge base (stdlib only).
@@ -132,7 +141,8 @@ def search(query: str, entries: list[Entry] | None = None,
     best-first [{name, score, entry-dict}].
     """
     entries = entries if entries is not None else load_all()
-    terms = [t for t in re.split(r"\W+", (query or "").lower()) if len(t) > 2]
+    terms = [t for t in re.split(r"\W+", (query or "").lower())
+             if len(t) > 2 and t not in _SEARCH_STOPWORDS]
     if not terms:
         return []
     scored = []
