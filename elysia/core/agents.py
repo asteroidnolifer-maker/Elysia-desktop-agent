@@ -37,6 +37,24 @@ ROLES = ["planner", "architect", "implementer", "tester", "debugger",
          "research_agent", "integration_agent", "release_agent"]
 
 
+def command_exists(root: str, cmd: str) -> bool:
+    """True if ``cmd`` is resolvable as a binary (test-runner discovery)."""
+    import shutil
+    return shutil.which(cmd) is not None
+
+
+def git_diff_text(root: str, head: str = "") -> str:
+    """Return the current working-tree diff (capped) for code review."""
+    import subprocess
+    r = subprocess.run(["git", "-C", root, "diff", "--stat", "--", "."],
+                       capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        return ""
+    body = subprocess.run(["git", "-C", root, "diff", "--", "."],
+                          capture_output=True, text=True, timeout=15)
+    return (body.stdout or "")[:8000]
+
+
 class AgentPipelineError(Exception):
     pass
 
@@ -70,6 +88,130 @@ class AgentPipeline:
                              task_id=task_id, error=err[:200])
             return None, err
         return text, ""
+
+    def _call(self, messages, role: str, task_id=None, reservation=None):
+        """Provider call for one pipeline stage.
+
+        If a held ProviderReservation is supplied (scheduler-owned slot) it is
+        used directly — the slot was acquired once and is released on finish.
+        Otherwise fall back to Manager.execute (atomic self-service reserve).
+        """
+        caps = self._role_caps(role)
+        if reservation is not None:
+            text, err = reservation.call_failover(messages, capabilities=caps)
+        else:
+            text, err = self.providers.execute(messages, capabilities=caps)
+        if err:
+            self.events.emit("provider.fallback", status="error",
+                             agent_id=role, task_id=task_id, error=err[:200])
+            return None, err
+        return text, ""
+
+    # -- execution -----------------------------------------------------------
+    def solve_task(self, task: dict, workspace, reservation=None,
+                   run_tests: bool = True) -> dict:
+        """Execute ONE claimed task against the real workspace.
+
+        Pipeline: status=running -> implementer writes owned files through the
+        controlled Workspace layer -> QA validates each written file -> tester
+        runs available test commands -> code_reviewer inspects the real git
+        diff -> store transition. Any provider failure marks the task failed
+        locally (scheduler decides retry).
+
+        Returns {"ok", "status", "result", "tests", "review"}.
+        """
+        from .qa import validate_file
+        from .git import dirty_files, is_repo
+        from .workspace import Workspace
+
+        tid = task.get("id")
+        ws = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
+        owned = [f for f in (task.get("owned_files") or []) if f]
+        spec = task.get("description") or task.get("title") or ""
+        self.events.emit("agent.run", agent_id="implementer", task_id=tid,
+                         status="started")
+        if tid is not None:
+            try:
+                self.store.transition(tid, "running")
+            except Exception:  # already past running is fine
+                pass
+        prompt = (
+            f"TASK: {task.get('title','')}\nDETAILS: {spec}\n"
+            f"FILES YOU OWN (write complete content for these only): {owned}\n"
+            f"Workspace root: {ws.root}\n\n"
+            "Output each file as a fenced code block whose opening fence line "
+            "ends with the relative path, e.g. ```md README.md. Never invent "
+            "paths outside the workspace.")
+        messages = [{"role": "system", "content":
+                     "You are the Elysia implementer writing repository files."},
+                    {"role": "user", "content": prompt}]
+        text, err = self._call(messages, "implementer", task_id=tid,
+                               reservation=reservation)
+        if err:
+            return self._stage_fail(tid, "running", f"implementer: {err}")
+
+        from orchestrator.brain import parse_file_blocks
+        files = parse_file_blocks(text, owned)
+        written, qa_failures = [], []
+        for path, content in files.items():
+            try:
+                ws.write_owned(path, content)
+                written.append(path)
+                ok, reason = validate_file(path, content)
+                if not ok:
+                    qa_failures.append(f"{path}: {reason}")
+            except Exception as e:  # noqa: BLE001
+                qa_failures.append(f"{path}: {e}")
+
+        # tester: run project tests if requested and a runner exists
+        test_result = ""
+        if run_tests and written:
+            test_result = self._run_tests(ws)
+        # code reviewer inspects the real git diff
+        review = ""
+        diff_text = ""
+        if is_repo(ws.root):
+            try:
+                diff_text = git_diff_text(ws.root)
+            except Exception:  # noqa: BLE001
+                diff_text = ""
+        if diff_text:
+            r = self.review(diff_text, task_id=tid)
+            review = r.get("review", "") if r.get("ok") else ""
+
+        if qa_failures:
+            msg = "QA failed: " + "; ".join(qa_failures[:5])
+            return self._stage_fail(tid, "testing", msg)
+        lines = [f"wrote {len(written)} file(s): {', '.join(written[:5])}"]
+        if test_result:
+            lines.append(test_result)
+        if review:
+            lines.append(review[:300])
+        if tid is not None:
+            self.store.complete(tid, "reviewing", "\n".join(lines))
+        return {"ok": True, "status": "reviewing", "result": "\n".join(lines),
+                "tests": test_result, "review": review}
+
+    def _run_tests(self, ws, timeout=120) -> str:
+        """Best-effort test runner via the QA harness (no unsafe shell)."""
+        from elysia.core.qa import run as qa_run
+        for cmd in (["python3", "-m", "pytest", "-q"],
+                    ["python3", "manage.py", "test", "--verbosity=1"]):
+            if command_exists(ws.root, cmd[0]):
+                rc, out = qa_run(cmd, cwd=ws.root, timeout=timeout)
+                if out:
+                    head = out.strip().splitlines()
+                    return f"tests ({cmd[0]}): rc={rc} :: {head[-1][:120] if head else ''}"
+        return ""
+
+    def _stage_fail(self, tid, status, reason):
+        if tid is not None:
+            try:
+                self.store.fail_attempt(tid, reason, backoff_s=30)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"ok": False, "status": status, "error": reason,
+                "result": reason}
 
     def _role_caps(self, role: str) -> list[str]:
         if self.cfg:

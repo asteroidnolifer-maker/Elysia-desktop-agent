@@ -8,6 +8,7 @@ never raise, never execute provider calls on the caller's thread for > cap.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 
@@ -37,6 +38,43 @@ def _pipeline() -> AgentPipeline:
     store = TaskStore(_store_path())
     return AgentPipeline(pm, store, cfg=cfg,
                          memory=Memory(cfg.memory.dir))
+
+
+_FILE_RE = re.compile(
+    r"[\w./-]+\.(?:py|md|rs|go|js|ts|tsx|jsx|sh|yaml|yml|json|toml|sql|css|html)",
+    re.I)
+
+
+def _extract_files(text: str | None) -> list[str]:
+    """Heuristic owned-file hints from a planner subtask (never traversal)."""
+    out = [p for p in (_FILE_RE.findall(text or ""))
+           if ".." not in p and not p.startswith("/")]
+    return list(dict.fromkeys(out))[:8]
+
+
+def _persist_goal(goal: str, subs: list[dict], store: TaskStore | None = None) -> list[dict]:
+    """Persist a goal durably on the board.
+
+    Goal becomes a done milestone; each planned subtask is a ready board task
+    depending on it. Because everything lives in SQLite, a crash before the
+    scheduler runs them is survivable: after restart the ready subtasks are
+    picked up by the scheduler exactly like any other board work.
+    """
+    store = store or TaskStore(_store_path())
+    gid = store.add_task(title=goal[:120] or "goal", description=goal,
+                         kind="goal", priority=0, status="done")
+    subs_out = []
+    for i, s in enumerate(subs):
+        detail = s.get("detail") or s.get("title") or ""
+        files = _extract_files(detail)
+        tid = store.add_task(title=(s.get("title") or goal)[:120],
+                             description=detail, kind="subtask",
+                             owned_files=files, dependencies=[gid],
+                             priority=3 + i)
+        store.mark_ready(tid)
+        subs_out.append({"id": tid, "files": files, "title":
+                         (s.get("title") or goal)[:120]})
+    return subs_out
 
 
 def run_agent(task: str, timeout_s: float = _MAX_WAIT_S) -> dict:
@@ -78,10 +116,17 @@ def run_agent(task: str, timeout_s: float = _MAX_WAIT_S) -> dict:
     if not res.get("ok"):
         return _enqueue_or_error(task, res.get("error") or "planning failed")
     tasks = res.get("tasks") or []
-    lines = [f"Planned {len(tasks)} sub-tasks:"] + [
-        f"  - {t.get('title', '')}" for t in tasks[:10]]
-    return {"ok": True, "status": "done", "reply": "\n".join(lines),
-            "detail": {"tasks": tasks}}
+    # Durable: write the plan to the board now, so a crash after this point
+    # still lets the scheduler pick the sub-tasks up after restart.
+    try:
+        subs = _persist_goal(task, tasks)
+    except Exception as e:  # noqa: BLE001
+        subs = []
+    lines = [f"Planned {len(tasks)} sub-tasks; queued {len(subs)} on the board:"] + [
+        f"  - {s['title']}" for s in subs[:10]]
+    return {"ok": True, "status": "done" if subs else "planned",
+            "reply": "\n".join(lines),
+            "detail": {"tasks": subs or tasks}}
 
 
 def _enqueue_or_error(task: str, reason: str) -> dict:

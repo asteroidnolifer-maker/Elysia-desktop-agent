@@ -128,25 +128,37 @@ class Provider:
     # -- entry point -------------------------------------------------------
     def chat(self, messages, max_tokens: int | None = None,
              temperature: float | None = None, timeout: int | None = None):
-        """One chat call. Returns (text, error)."""
+        """One chat call with its own concurrency slot. Returns (text, error)."""
         if not self.acquire():
             return "", "provider busy (concurrency limit)"
-        self.requests += 1
-        t0 = time.time()
         try:
-            if self.cfg.kind == "cli":
-                text, err = self._chat_cli(messages)
-            else:
-                text, err = self._chat_openai(messages, max_tokens,
-                                              temperature, timeout)
-            if err:
-                self.mark_error(err)
-            else:
-                self.status = self.HEALTHY
-                self.total_latency_s += time.time() - t0
-            return text, err
+            return self._chat_unaccounted(messages, max_tokens=max_tokens,
+                                          temperature=temperature, timeout=timeout)
         finally:
             self.release()
+
+    def _chat_unaccounted(self, messages, max_tokens: int | None = None,
+                          temperature: float | None = None,
+                          timeout: int | None = None):
+        """Transport + stats without touching the concurrency slot.
+
+        Callers that already hold a slot (e.g. ProviderManager.execute or a
+        ProviderReservation) MUST go through this method so a request acquires
+        EXACTLY one slot, never two.
+        """
+        self.requests += 1
+        t0 = time.time()
+        if self.cfg.kind == "cli":
+            text, err = self._chat_cli(messages)
+        else:
+            text, err = self._chat_openai(messages, max_tokens,
+                                          temperature, timeout)
+        if err:
+            self.mark_error(err)
+        else:
+            self.status = self.HEALTHY
+            self.total_latency_s += time.time() - t0
+        return text, err
 
     # -- backends ----------------------------------------------------------
     def _chat_openai(self, messages, max_tokens, temperature, timeout):
@@ -225,6 +237,61 @@ class Provider:
         }
 
 
+class ProviderReservation:
+    """A held provider slot. Guarantees exactly one acquire-release pair.
+
+    Usable as a context manager; the slot is released on exit even if the
+    underlying call raises.
+    """
+
+    def __init__(self, manager: "ProviderManager", provider: Provider):
+        self.manager = manager
+        self.provider = provider
+
+    def call(self, messages, max_tokens: int | None = None,
+             temperature: float | None = None, timeout: int | None = None):
+        if self.provider is None:
+            return None, "reservation released"
+        return self.provider._chat_unaccounted(
+            messages, max_tokens=max_tokens, temperature=temperature,
+            timeout=timeout)
+
+    def call_failover(self, messages, capabilities=None, max_tokens=None,
+                      temperature=None, timeout=None):
+        """Call via the held slot; if it errors, return the slot and let the
+        manager fail over to the next provider.
+
+        Exactly one slot is ever held (ours first, then the next provider's);
+        the reservation is marked released so the scheduler's later
+        ``release_reserved`` stays idempotent.
+        """
+        if self.provider is None:
+            return self.manager.execute(messages, capabilities=capabilities,
+                                        max_tokens=max_tokens,
+                                        temperature=temperature, timeout=timeout)
+        text, err = self.provider._chat_unaccounted(
+            messages, max_tokens=max_tokens, temperature=temperature,
+            timeout=timeout)
+        if err:
+            self.release()
+            text, err = self.manager.execute(
+                messages, capabilities=capabilities, max_tokens=max_tokens,
+                temperature=temperature, timeout=timeout)
+        return text, err
+
+    def release(self) -> None:
+        if self.provider is None:
+            return
+        self.provider.release()
+        self.provider = None
+
+    def __enter__(self) -> "ProviderReservation":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
 class ProviderManager:
     def __init__(self, ordering: list[tuple] | None = None):
         self._providers: dict[str, Provider] = {}
@@ -266,6 +333,9 @@ class ProviderManager:
 
         Uses configured priority order (fallback-friendly). Returns None if
         nothing suitable is available (caller queues the task instead).
+
+        NOTE: this is a capacity *probe*. For atomic, held reservations use
+        ``reserve()`` — the slot is then guaranteed for the whole call.
         """
         caps = set(capabilities or [])
         avoid = set(avoid_models or [])
@@ -277,42 +347,79 @@ class ProviderManager:
             if caps and not p.has_all(caps):
                 continue
             if p.acquire():
-                p.release()  # sample; actual acquire during use
+                p.release()  # probe; actual reservation via reserve()
                 return p
+        return None
+
+    def reserve(self, capabilities=None, avoid_models=None,
+                preferred=None, exclude=()) -> "ProviderReservation | None":
+        """Atomically select AND hold a provider slot (lease).
+
+        Race-safe: two schedulers cannot both hold the final slot of a provider.
+        The caller must call ``.release()`` (or use it as a context manager)
+        exactly once when the work is done. ``exclude`` skips provider names
+        already tried in this fallback chain.
+        """
+        caps = set(capabilities or [])
+        avoid = set(avoid_models or [])
+        skip = set(exclude or ())
+        candidates = self._ordered()
+        if preferred:
+            p = self.get(preferred)
+            if p and p.name not in skip:
+                candidates = [p] + [x for x in candidates
+                                    if x.name != preferred]
+            else:
+                candidates = list(candidates)
+        # always honor the exclude set (fallback chain never re-tries)
+        candidates = [x for x in candidates if x.name not in skip]
+        for p in candidates:
+            if p.status == Provider.UNAVAILABLE and not preferred:
+                continue
+            if p.cfg.model in avoid:
+                continue
+            if caps and not p.has_all(caps):
+                continue
+            if p.acquire():  # slot held until release()
+                return ProviderReservation(self, p)
         return None
 
     def execute(self, messages, capabilities=None, max_tokens=None,
                 temperature=None, timeout=None, preferred=None) -> tuple:
         """Try providers in priority order until one succeeds.
 
-        Returns (text, error). If all providers fail, returns (None, summary of
-        errors) — never raises for a provider failure.
+        Each attempt acquires EXACTLY one slot (never two), so
+        ``concurrency=1`` providers work correctly. Providers that error,
+        crash (raise) or rate-limit are skipped, and the next provider takes
+        over. Never raises for a provider failure.
         """
         caps = set(capabilities or [])
-        candidates = self._ordered()
-        if preferred:
-            p = self.get(preferred)
-            if p:
-                candidates = [p] + [x for x in candidates if x.name != preferred]
-        errors = []
-        for p in candidates:
-            if p.status == Provider.UNAVAILABLE and not preferred:
-                continue
-            if caps and not p.has_all(caps):
-                continue
-            if not p.acquire():
-                continue
+        tried: set[str] = set()
+        errors: list[str] = []
+        while len(tried) < len(self.list()):
+            res = self.reserve(capabilities=caps or None,
+                               avoid_models=None, preferred=preferred,
+                               exclude=tried)
+            if res is None:
+                break
+            provider = res.provider
+            name = provider.name
+            tried.add(name)
+            rate_limited = False
             try:
-                text, err = p.chat(messages, max_tokens=max_tokens,
-                                   temperature=temperature, timeout=timeout)
+                text, err = res.call(messages, max_tokens=max_tokens,
+                                     temperature=temperature, timeout=timeout)
                 if not err:
                     return text, ""
-                errors.append(f"{p.name}: {err[:120]}")
+                errors.append(f"{name}: {err[:120]}")
+            except Exception as e:  # noqa: BLE001 — provider crash must not kill the caller
+                provider.mark_error(f"exception: {type(e).__name__}: {str(e)[:120]}")
+                errors.append(f"{name}: exception {type(e).__name__}: {str(e)[:120]}")
             finally:
-                p.release()
-            if p.status == Provider.RATE_LIMITED:
-                # rate limited—try next provider rather than hammering
-                continue
+                rate_limited = provider.status == Provider.RATE_LIMITED
+                res.release()
+            if rate_limited:
+                continue  # try next provider rather than hammering
         summary = "; ".join(errors) if errors else "no provider available"
         return None, summary
 

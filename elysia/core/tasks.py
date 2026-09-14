@@ -71,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority) WHERE status='r
 """
 
 # Lifecycle helpers
-TERMINAL = {"done", "failed", "cancelled", "dependency_failed"}
+TERMINAL = {"completed", "done", "failed", "cancelled", "dependency_failed"}
 ACTIVE = {"queued", "ready", "claimed", "running", "testing", "reviewing",
           "retrying"}
 ALLOWED = {"queued", "ready", "claimed", "running", "testing", "reviewing",
@@ -89,15 +89,32 @@ def iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
 
 
+# Explicit, edge-by-edge transition table. A status may ONLY move to one of
+# the targets listed here; anything else is rejected by `transition()`.
+VALID_TRANSITIONS: dict[str, set[str]] = {
+    "queued":            {"ready", "cancelled", "failed", "dependency_failed"},
+    "ready":             {"claimed", "queued", "cancelled", "failed",
+                          "completed", "done", "dependency_failed"},
+    "claimed":           {"running", "ready", "cancelled", "failed",
+                          "completed", "done"},  # worker may finish direct
+    "running":           {"testing", "reviewing", "ready", "failed",
+                          "cancelled", "completed", "done"},
+    "testing":           {"reviewing", "ready", "failed", "cancelled"},
+    "reviewing":         {"completed", "done", "ready", "failed", "cancelled"},
+    "retrying":          {"ready", "cancelled", "failed"},
+    "completed":         set(),            # terminal
+    "done":              set(),            # terminal
+    "failed":            {"retrying", "ready"},
+    "cancelled":         set(),            # terminal
+    "dependency_failed": set(),            # terminal
+}
+
+
 def status_transition(current: str, target: str) -> bool:
-    """Validate that ``current -> target`` is a legal lifecycle move."""
+    """True iff ``current -> target`` is an explicit legal lifecycle move."""
     if current == target:
-        return True
-    if current in TERMINAL:
-        return False
-    if target not in ALLOWED:
-        return False
-    return True
+        return False        # no-op moves are not transitions
+    return target in VALID_TRANSITIONS.get(current, set())
 
 
 class TaskStore:
@@ -205,15 +222,26 @@ class TaskStore:
         con.close()
 
     def set_status(self, task_id: int, status: str):
+        """Explicit, validated status change (rejects illegal moves)."""
         if status not in ALLOWED:
             raise ValueError(f"illegal status {status}")
-        self._update(task_id, status=status)
+        if not self.transition(task_id, status):
+            raise ValueError(f"unknown task {task_id}")
 
     def transition(self, task_id: int, target: str, last_error: str | None = None):
-        """Validate and apply a lifecycle transition."""
+        """Validate and apply a lifecycle transition.
+
+        Same-status moves are idempotent no-ops (still apply last_error if
+        given). Illegal edges raise ValueError.
+        """
         t = self.get(task_id)
         if not t:
             return False
+        if t["status"] == target:
+            # idempotent no-op
+            if last_error is not None:
+                self._update(task_id, last_error=last_error)
+            return True
         if not status_transition(t["status"], target):
             raise ValueError(
                 f"invalid transition {t['status']} -> {target} (task {task_id})")
@@ -227,10 +255,12 @@ class TaskStore:
         return True
 
     def mark_ready(self, task_id: int) -> None:
-        self._update(task_id, status="ready", backoff_until=None)
+        self.transition(task_id, "ready")
+        self._update(task_id, backoff_until=None)
 
     def mark_queued(self, task_id: int) -> None:
-        self._update(task_id, status="queued", backoff_until=None)
+        self.transition(task_id, "queued")
+        self._update(task_id, backoff_until=None)
 
     # -- claim / lease ------------------------------------------------------
     def claim(self, task_id: int, worker: str, provider: str | None,
@@ -289,9 +319,10 @@ class TaskStore:
 
     def complete(self, task_id: int, status: str, result: str | None,
                  test_status: str | None = None) -> None:
-        self._update(task_id, status=status, result=result,
-                     test_status=test_status, completed_at=_now(),
-                     lease_expires_at=None, last_error=None)
+        self.transition(task_id, status)
+        self._update(task_id, result=result, test_status=test_status,
+                     completed_at=_now(), lease_expires_at=None,
+                     last_error=None)
 
     def fail_attempt(self, task_id: int, error: str, backoff_s: float) -> bool:
         """Register an attempt failure. If max_attempts reached -> failed."""
@@ -303,33 +334,41 @@ class TaskStore:
             self.transition(task_id, "failed", last_error=error)
             self._update(task_id, completed_at=_now())
             return False
-        self._update(task_id, status="ready",
-                     backoff_until=time.time() + backoff_s,
-                     last_error=error, worker=None, provider=None, model=None,
+        self.transition(task_id, "ready", last_error=error)
+        self._update(task_id, backoff_until=time.time() + backoff_s,
+                     worker=None, provider=None, model=None,
                      lease_expires_at=None)
         return True
 
     def timeout_task(self, task_id: int) -> None:
-        self._update(task_id, status="ready", worker=None, provider=None,
-                     model=None, lease_expires_at=None, backoff_until=None,
-                     last_error="timed out; released")
+        self.transition(task_id, "ready", last_error="timed out; released")
+        self._update(task_id, worker=None, provider=None, model=None,
+                     lease_expires_at=None, backoff_until=None)
 
     # -- release / expiry ---------------------------------------------------
+    def _lease_outcome(self, attempts: int, max_attempts: int) -> str:
+        """A lease loss resolves to 'failed' (too many attempts) or 'ready'."""
+        return "failed" if (attempts or 0) >= max_attempts else "ready"
+
     def release_expired(self, max_attempts: int = 3) -> list[int]:
         """Reopen claimed tasks whose lease expired without heartbeat.
 
-        Returns released task ids (for scheduler events).
+        Only performs table-legal transitions (claimed/running/testing/
+        reviewing/retrying -> ready|failed). Returns released task ids.
         """
         con = self._connect()
         now = time.time()
         rows = con.execute(
-            "SELECT id, attempts FROM tasks WHERE status IN "
+            "SELECT id, status, attempts FROM tasks WHERE status IN "
             "('claimed','running','testing','reviewing','retrying') "
             "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
             (now,)).fetchall()
         out = []
         for r in rows:
-            if (r["attempts"] or 0) >= max_attempts:
+            target = self._lease_outcome(r["attempts"], max_attempts)
+            if not status_transition(r["status"], target):
+                continue  # not a table-legal move — leave untouched
+            if target == "failed":
                 con.execute(
                     "UPDATE tasks SET status='failed', last_error=?, "
                     "completed_at=?, worker=NULL, provider=NULL, model=NULL, "
@@ -351,10 +390,14 @@ class TaskStore:
         con = self._connect()
         now = time.time()
         rows = con.execute(
-            "SELECT id, attempts FROM tasks WHERE worker=?", (worker,)).fetchall()
+            "SELECT id, status, attempts FROM tasks WHERE worker=?",
+            (worker,)).fetchall()
         out = []
         for r in rows:
-            if (r["attempts"] or 0) >= max_attempts:
+            target = self._lease_outcome(r["attempts"], max_attempts)
+            if not status_transition(r["status"], target):
+                continue
+            if target == "failed":
                 con.execute(
                     "UPDATE tasks SET status='failed', last_error=?, "
                     "completed_at=?, worker=NULL WHERE id=?",
@@ -374,12 +417,16 @@ class TaskStore:
     def cancel(self, task_id: int, by: str = "user",
                deps_cascade: bool = True) -> list[int]:
         """Cancel a task (and, optionally, tasks waiting on it). Returns any
-        additional task ids that were cancelled via dependency cascade."""
+        additional task ids that were cancelled via dependency cascade.
+
+        Only table-legal moves (non-terminal -> cancelled) are applied.
+        """
         out = []
         t = self.get(task_id)
         if not t:
             return out
-        if t["status"] not in TERMINAL:
+        if t["status"] not in TERMINAL and status_transition(t["status"],
+                                                             "cancelled"):
             self._update(task_id, status="cancelled", cancelled_by=by,
                          completed_at=_now(), lease_expires_at=None,
                          last_error=f"cancelled (by {by})")
@@ -387,7 +434,8 @@ class TaskStore:
         if deps_cascade:
             for dep in self._dependent_on(task_id):
                 d = self.get(dep)
-                if d and d["status"] not in TERMINAL:
+                if d and d["status"] not in TERMINAL and status_transition(
+                        d["status"], "cancelled"):
                     self._update(dep, status="cancelled", cancelled_by=by,
                                  completed_at=_now(),
                                  last_error=f"dependency {task_id} cancelled")
@@ -398,14 +446,14 @@ class TaskStore:
         t = self.get(task_id)
         if not t or t["status"] != "ready":
             return False
-        self._update(task_id, status="queued", last_error="paused")
+        self.transition(task_id, "queued", last_error="paused")
         return True
 
     def resume(self, task_id: int) -> bool:
         t = self.get(task_id)
         if not t or t["status"] != "queued":
             return False
-        self._update(task_id, status="ready", last_error=None)
+        self.transition(task_id, "ready", last_error=None)
         return True
 
     def _dependent_on(self, task_id: int) -> list[int]:
@@ -425,12 +473,12 @@ class TaskStore:
     # -- retries / backoff --------------------------------------------------
     def retry(self, task_id: int, reset_attempts: bool = False) -> bool:
         t = self.get(task_id)
-        if not t or t["status"] not in TERMINAL:
+        if not t or not status_transition(t["status"], "ready"):
             return False
         if reset_attempts:
             self._update(task_id, attempts=0)
-        self._update(task_id, status="ready", backoff_until=None,
-                     last_error="retry requested", completed_at=None,
+        self.transition(task_id, "ready", last_error="retry requested")
+        self._update(task_id, backoff_until=None, completed_at=None,
                      worker=None, provider=None, model=None,
                      lease_expires_at=None)
         return True
@@ -522,10 +570,14 @@ class TaskStore:
                 if not self._deps_ready(json.loads(r["dependencies"] or "[]"))]
 
     def failed_after_dependency(self, dep_id: int) -> list[int]:
-        """Mark ready tasks whose dependency failed as dependency_failed."""
-        rows = [r for r in self.list(status="ready") if dep_id in (r.get("dependencies") or [])]
+        """Mark ready/queued tasks whose dependency failed as dependency_failed."""
+        rows = [r for r in self.list()
+                if r["status"] in ("ready", "queued")
+                and dep_id in (r.get("dependencies") or [])]
         out = []
         for r in rows:
+            if not status_transition(r["status"], "dependency_failed"):
+                continue
             con = self._connect()
             con.execute("UPDATE tasks SET status='dependency_failed', "
                         "completed_at=?, last_error=?, lease_expires_at=NULL "

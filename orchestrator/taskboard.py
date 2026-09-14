@@ -113,10 +113,7 @@ def finish_task(task_id, status, worker, result=None):
 def release_stale(worker):
     """Release all locks/tasks held by a given worker (used on worker death)."""
     s = store()
-    for t in s.list(status="claimed"):
-        if t.get("worker") == worker:
-            s._update(t["id"], status="ready", worker=None, provider=None, model=None,
-                      lease_expires_at=None)
+    s.release_all_for_worker(worker)   # table-validated claimed->ready/failed
     con = connect()
     try:
         con.execute("DELETE FROM locks WHERE worker=?", (worker,))

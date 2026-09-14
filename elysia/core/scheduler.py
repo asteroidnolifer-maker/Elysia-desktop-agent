@@ -91,6 +91,11 @@ class Scheduler:
         self.workers = WorkerRegistry(self.heartbeat_grace_s * 3)
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        # Provider slots we hold while a claimed task is being executed. The
+        # slot is released when the task finishes/cancels or the worker is
+        # declared stale — this is what makes selection+reservation atomic.
+        self._reserved: dict[int, "ProviderReservation"] = {}
+        self._reserved_mu = threading.Lock()
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
@@ -129,12 +134,14 @@ class Scheduler:
         # 2) expired leases
         released = self.store.release_expired(self.max_attempts)
         for tid in released:
+            self.release_reserved(tid)  # slot freed; task back to ready/failed
             self.events.emit("task.lease_expired", task_id=tid, status="ready")
         # 3) per-task timeouts
         for t in self.store.list(status="claimed"):
             ts = t.get("timeout_s")
             if ts and t.get("started_at") and now - t["started_at"] > ts:
                 self.store.timeout_task(t["id"])
+                self.release_reserved(t["id"])
                 self.events.emit("task.timeout", task_id=t["id"], status="ready")
         # 4) dependency failure propagation
         for dep in self.store.list(status="failed"):
@@ -145,6 +152,7 @@ class Scheduler:
         # 5) release expired workers' claims
         for w in self.workers.stale():
             for tid in self.store.release_all_for_worker(w, self.max_attempts):
+                self.release_reserved(tid)
                 self.events.emit("task.worker_lost", task_id=tid, worker=w,
                                  status="ready")
             self.workers.expire(w)
@@ -168,26 +176,44 @@ class Scheduler:
                 break
             if len(claimed) >= budget:
                 break
-            provider = self._select_provider(task, capabilities)
-            if provider is None:
+            tid = task["id"]
+            res = self._reserve_provider(task, capabilities)
+            if res is None:
                 self.events.emit("scheduler", status="no_provider",
-                                 task_id=task["id"])
+                                 task_id=tid)
                 continue
-            if not self.store.claim(task["id"], self.worker_id,
+            provider = res.provider
+            if not self.store.claim(tid, self.worker_id,
                                     provider.name, provider.cfg.model,
                                     self.lease_seconds):
+                res.release()   # claim failed — hand the slot back
                 continue
-            self.events.emit("task.claimed", task_id=task["id"],
+            with self._reserved_mu:
+                self._reserved[tid] = res   # slot held until finish/cancel
+            self.events.emit("task.claimed", task_id=tid,
                              agent_id=self.worker_id, provider=provider.name,
                              model=provider.cfg.model, status="claimed")
-            claimed.append(self.store.get(task["id"]))
+            claimed.append(self.store.get(tid))
         return claimed
 
-    def _select_provider(self, task, capabilities):
+    def _reserve_provider(self, task, capabilities):
+        """Atomically select AND hold a provider slot for this task.
+
+        Returns a held ProviderReservation (slot acquired) or None. The slot
+        stays held until the task is finished/cancelled or the worker is
+        declared stale — two schedulers can never both hold the final slot.
+        """
         caps = set(capabilities or [])
         if not caps:
-            caps = self._role_caps(task.get("agent_role"))
-        return self.providers.select(capabilities=caps or None)
+            caps = self._role_caps(task.get("agent_role")) or set()
+        return self.providers.reserve(capabilities=caps) or None
+
+    def release_reserved(self, task_id: int) -> None:
+        """Return a held provider slot (idempotent)."""
+        with self._reserved_mu:
+            res = self._reserved.pop(task_id, None)
+        if res is not None:
+            res.release()
 
     @staticmethod
     def _role_caps(role):
@@ -232,12 +258,45 @@ class Scheduler:
     def finish(self, task_id: int, worker: str, status: str, result: str = "",
                test_status: str | None = None) -> None:
         self.store.complete(task_id, status, result or "", test_status)
+        self.release_reserved(task_id)
         self.events.emit("task.finished", task_id=task_id, agent_id=worker,
                          status=status, result=(result or "")[:200])
 
     def cancel(self, task_id: int, by: str = "user") -> list[int]:
         affected = self.store.cancel(task_id, by=by, deps_cascade=True)
         for tid in affected:
+            self.release_reserved(tid)
             self.events.emit("task.cancelled", task_id=tid, status="cancelled",
                              by=by)
         return affected
+
+    # -- in-process execution --------------------------------------------------
+    def execute_claimed(self, task: dict, workspace_root: str,
+                        run_tests: bool = True, timeout_s=600) -> dict:
+        """Execute a claimed task to completion in THIS process.
+
+        Runs the AgentPipeline stage chain (implementer -> QA -> tester ->
+        reviewer) against the real Workspace, reusing the provider slot the
+        scheduler reserved at dispatch time. On success the task is completed;
+        on provider/QA failure it is failed (retry/backoff policy applies).
+        Returns {"ok", "status", "result"}.
+        """
+        from .agents import AgentPipeline
+
+        tid = task.get("id")
+        with self._reserved_mu:
+            res = self._reserved.get(tid)
+        pipeline = AgentPipeline(self.providers, self.store, events=self.events,
+                                 cfg=self.cfg)
+        if res is None:
+            # not scheduled by us (external claim) — self-accounting reserve
+            outcome = pipeline.solve_task(task, workspace_root,
+                                          reservation=None,
+                                          run_tests=run_tests)
+        else:
+            outcome = pipeline.solve_task(task, workspace_root, reservation=res,
+                                          run_tests=run_tests)
+            self.finish(tid, self.worker_id,
+                        "completed" if outcome.get("ok") else "failed",
+                        outcome.get("result") or outcome.get("error") or "")
+        return outcome

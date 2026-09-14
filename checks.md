@@ -9,12 +9,17 @@ Run these in order; the whole envelope must stay green.
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all tests pass** (currently 64), including the new
+Expected: **all tests pass** (currently 88), including the new
 `tests/test_features.py` bundle covering context budgeting, telemetry/cost,
 tool risk gating, computer permissions + shell gating, skills risk assessment
 (intent-based, false-positive free), templates expansion, research engine
 offline + deep, openreacher module, project intel, plugins allow-listing,
-doctor, git checkpoint/rollback, and the rewired server `/api/agent`.
+doctor, git checkpoint/rollback, the rewired server `/api/agent`, and
+`tests/test_integration.py` — the full runtime call graph (goal ->
+persistent board tasks -> scheduler atomic reservation -> AgentPipeline
+`solve_task` -> real Workspace write -> completion), concurrency caps,
+reservation-slot release on cancel, provider failover within one task,
+process-restart durability, and provider-failure handling.
 
 ## 2. Compile check
 

@@ -46,24 +46,51 @@ FILEMARK_RE = re.compile(
 )
 
 
-def _provider():
-    """Build the default provider from config/env (local backend unless overridden)."""
+_MANAGER = None          # process-global manager (concurrency accounting)
+_MANAGER_SIG = None
+
+
+def _provider_sig(cfg):
+    """Tuple identifying the configured provider set (cache key)."""
+    return tuple((p.kind, p.label, p.model, p.base_url, p.concurrency)
+                 for p in (cfg.providers or []))
+
+
+def _manager():
+    """Build (once) a ProviderManager from ALL configured providers.
+
+    Memoized: one shared manager per process so concurrency caps and failover
+    counters apply across concurrent calls — this is the single canonical AI
+    execution seam. Rebuilds only when the provider set changes.
+    """
+    global _MANAGER, _MANAGER_SIG
     from elysia.core.config import ProviderConfig
-    from elysia.core.providers import Provider
+    from elysia.core.providers import ProviderManager
     cfg = load_config()
-    if cfg.providers:
-        p0 = cfg.providers[0]
-    else:
-        p0 = ProviderConfig(kind="openai", label="local", model=MODEL,
-                            base_url=LLAMA_URL)
-    return Provider(p0)
+    sig = _provider_sig(cfg)
+    if _MANAGER is None or sig != _MANAGER_SIG:
+        pm = ProviderManager()
+        if cfg.providers:
+            pm.register_many(cfg.providers)
+        else:
+            pm.register(ProviderConfig(kind="openai", label="local",
+                                       model=MODEL, base_url=LLAMA_URL))
+        _MANAGER, _MANAGER_SIG = pm, sig
+    return _MANAGER
 
 
 def chat(messages, max_tokens=2048, temperature=0.2, timeout=900, provider=None):
-    """One chat call through the provider abstraction. Returns (text, error)."""
-    p = provider or _provider()
-    return p.chat(messages, max_tokens=max_tokens, temperature=temperature,
-                  timeout=timeout)
+    """One chat call through the provider abstraction. Returns (text, error).
+
+    Default path is ProviderManager.execute (capability-aware, with failover).
+    An explicit ``provider`` bypasses the manager for single-provider callers.
+    """
+    if provider is not None:
+        return provider.chat(messages, max_tokens=max_tokens,
+                             temperature=temperature, timeout=timeout)
+    return _manager().execute(messages, capabilities=["chat"],
+                              max_tokens=max_tokens, temperature=temperature,
+                              timeout=timeout)
 
 
 def parse_file_blocks(text, owned=None):
@@ -82,9 +109,13 @@ def parse_file_blocks(text, owned=None):
     EXTS = (".md", ".ts", ".tsx", ".js", ".json", ".py", ".go", ".sh", ".yaml", ".yml")
     for m in FENCE_RE.finditer(text):
         tok, body = m.group(2).strip(), m.group(3)
+        # some models fuse language + path into one token: "py f.py"
+        words = tok.split()
+        path = words[-1] if words else ""
         # treat the token after the language as a path only if it looks like one
-        looks_like_path = bool(tok) and ("/" in tok or tok.lower().endswith(EXTS))
-        candidates.append((tok if looks_like_path else None, body))
+        looks_like_path = bool(path) and (
+            "/" in path or path.lower().endswith(EXTS))
+        candidates.append((path if looks_like_path else None, body))
     if not candidates:
         for m in FILEMARK_RE.finditer(text):
             candidates.append((m.group(1).strip(), m.group(2)))
@@ -128,8 +159,9 @@ def qa_check(path, content):
 
 
 def health():
-    """True if the configured model API answers (any provider)."""
-    return _provider().check_health() == "healthy"
+    """True if ANY configured provider's API answers."""
+    pm = _manager()
+    return any(p.check_health() == "healthy" for p in pm.list())
 
 
 if __name__ == "__main__":
