@@ -13,7 +13,7 @@
     "max_tokens": 1024,
     "openai_api_key": "none"
   },
-  "workspace_dir": "C:\\Users\\Asteroid\\source\\repos\\AI project\\agent-core\\workspace",
+  "workspace_dir": "workspace",
   "sandbox_allow_commands": [
     "go",
     "python",

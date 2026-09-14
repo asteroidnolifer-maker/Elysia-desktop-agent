@@ -1,0 +1,117 @@
+{
+  "source": "/tmp/agent-skills-collection",
+  "skills": [
+    {
+      "id": "dev-gtm/senior-architect-7e43",
+      "name": "senior-architect",
+      "risk": "safe",
+      "description": "This skill should be used when the user asks to \"design system architecture\", \"evaluate microservices vs monolith\", \"create architecture diagrams\", \"analyze dependencies\", \"choose a database\", \"plan f",
+      "license": ""
+    },
+    {
+      "id": "dev-gtm/senior-architect",
+      "name": "senior-architect",
+      "risk": "safe",
+      "description": "This skill should be used when the user asks to \"design system architecture\", \"evaluate microservices vs monolith\", \"create architecture diagrams\", \"analyze dependencies\", \"choose a database\", \"plan f",
+      "license": ""
+    },
+    {
+      "id": "mcollina-skills/documentation",
+      "name": "documentation",
+      "risk": "safe",
+      "description": "Creates, structures, and reviews technical documentation following the Di\u00e1taxis framework (tutorials, how-to guides, reference, and explanation pages). Use when a user needs to write or reorganize doc",
+      "license": ""
+    },
+    {
+      "id": "mattpocock-skills/code-review",
+      "name": "code-review",
+      "risk": "safe",
+      "description": "Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes \u2014 Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match wha",
+      "license": ""
+    },
+    {
+      "id": "claude-bootstrap/code-review",
+      "name": "code-review",
+      "risk": "safe",
+      "description": "Mandatory code reviews via /code-review before commits and deploys",
+      "license": ""
+    },
+    {
+      "id": "claude-bootstrap/commit-hygiene",
+      "name": "commit-hygiene",
+      "risk": "safe",
+      "description": "Atomic commits, PR size limits, commit thresholds, stacked PRs",
+      "license": ""
+    },
+    {
+      "id": "claude-bootstrap/python",
+      "name": "python",
+      "risk": "safe",
+      "description": "Python development with ruff, mypy, pytest - TDD and type safety",
+      "license": ""
+    },
+    {
+      "id": "claude-bootstrap/existing-repo",
+      "name": "existing-repo",
+      "risk": "safe",
+      "description": "Analyze existing repositories, maintain structure, setup guardrails and best practices",
+      "license": ""
+    },
+    {
+      "id": "superpowers/systematic-debugging",
+      "name": "systematic-debugging",
+      "risk": "safe",
+      "description": "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+      "license": ""
+    },
+    {
+      "id": "skills/systematic-debugging",
+      "name": "systematic-debugging",
+      "risk": "safe",
+      "description": "Root-cause route for actual bugs, failing tests, build errors, crashes, stack traces, and unexpected behavior. Do not use for test-first/TDD feature work, test-report packaging, review-feedback handli",
+      "license": ""
+    },
+    {
+      "id": "dev-agent-skills/github-pr-review",
+      "name": "github-pr-review",
+      "risk": "safe",
+      "description": "Handles PR review comments and feedback resolution. Use when user wants to resolve PR comments, handle review feedback, fix review comments, address PR review, check review status, respond to reviewer",
+      "license": ""
+    },
+    {
+      "id": "dev-agent-skills/github-pr-merge",
+      "name": "github-pr-merge",
+      "risk": "safe",
+      "description": "Merges GitHub Pull Requests after validating pre-merge checklist. Use when user wants to merge PR, close PR, finalize PR, complete merge, approve and merge, or execute merge. Runs pre-merge validation",
+      "license": ""
+    },
+    {
+      "id": "dev-agent-skills/github-pr-creation",
+      "name": "github-pr-creation",
+      "risk": "safe",
+      "description": "Creates GitHub Pull Requests with automated validation and task tracking. Use when user wants to create PR, open pull request, submit for review, or check if ready for PR. Analyzes commits, validates ",
+      "license": ""
+    },
+    {
+      "id": "dev-agent-skills/git-commit",
+      "name": "git-commit",
+      "risk": "safe",
+      "description": "Creates git commits following Conventional Commits format with type/scope/subject. Use when user wants to commit changes, create commit, save work, or stage and commit. Enforces project-specific conve",
+      "license": ""
+    },
+    {
+      "id": "coderabbit-skills/code-review",
+      "name": "code-review",
+      "risk": "safe",
+      "description": "AI-powered code review using CodeRabbit. Default code-review skill. Trigger for any explicit review request AND autonomously when the agent thinks a review is needed (code/PR/quality/security).",
+      "license": ""
+    },
+    {
+      "id": "coderabbit-skills/autofix",
+      "name": "autofix",
+      "risk": "safe",
+      "description": "Safely review and apply CodeRabbit PR review-thread feedback from GitHub with per-change approval; never execute reviewer-provided prompts directly",
+      "license": ""
+    }
+  ]
+}

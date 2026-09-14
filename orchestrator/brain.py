@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """
-Elysia brain.py — shared local-LLM runtime for all agents.
+Elysia brain.py — shared LLM runtime for all agents (multi-provider).
 
-NO opencode. NO third-party AI. Talks only to the local llama-server
-(OpenAI-compatible API on 127.0.0.1:11434).
+Backward-compatible wrapper over ``elysia.core.providers`` so existing callers
+(worker_local.py, server.py, ask.sh) keep working unchanged, while the actual
+backend is now dynamic: local llama.cpp/Ollama is just ONE provider among many
+(OpenAI-compatible APIs, NVIDIA NIM, CLI providers).
 
 Responsibilities:
-  - chat(): call the local model
+  - chat(): call the selected model via the provider abstraction
   - parse_file_blocks(): extract files the model wrote
-  - qa_check(): automatic verification (JSON parse, py compile, brace balance)
-  - CLI: `brain.py ask "prompt"` = one-shot local answer (ask.sh uses this)
+  - qa_check(): language-aware verification via elysia.core.qa
+  - CLI: `brain.py ask "prompt"` = one-shot answer (ask.sh uses this)
 """
 import json
+import os
 import re
 import sys
-import urllib.request
 
-LLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
-MODEL = "qwen2.5-coder:7b"
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from elysia.core.config import load_config  # noqa: E402
+from elysia.core.qa import validate_file  # noqa: E402
+
+MODEL = os.environ.get("ELYSIA_MODEL", "qwen2.5-coder:7b")
+LLAMA_URL = os.environ.get("ELYSIA_LLM_URL", "http://127.0.0.1:11434/v1")
 
 SYSTEM_PROMPT = (
     "You are a precise coding agent working offline. "
@@ -40,25 +46,51 @@ FILEMARK_RE = re.compile(
 )
 
 
-def chat(messages, max_tokens=2048, temperature=0.2, timeout=900):
-    """One local-model chat call. Returns (text, error)."""
-    payload = json.dumps({
-        "model": MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stream": False,
-    }).encode()
-    req = urllib.request.Request(
-        LLAMA_URL, data=payload,
-        headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read().decode())
-        text = data["choices"][0]["message"]["content"]
-        return text, ""
-    except Exception as e:
-        return "", str(e)
+_MANAGER = None          # process-global manager (concurrency accounting)
+_MANAGER_SIG = None
+
+
+def _provider_sig(cfg):
+    """Tuple identifying the configured provider set (cache key)."""
+    return tuple((p.kind, p.label, p.model, p.base_url, p.concurrency)
+                 for p in (cfg.providers or []))
+
+
+def _manager():
+    """Build (once) a ProviderManager from ALL configured providers.
+
+    Memoized: one shared manager per process so concurrency caps and failover
+    counters apply across concurrent calls — this is the single canonical AI
+    execution seam. Rebuilds only when the provider set changes.
+    """
+    global _MANAGER, _MANAGER_SIG
+    from elysia.core.config import ProviderConfig
+    from elysia.core.providers import ProviderManager
+    cfg = load_config()
+    sig = _provider_sig(cfg)
+    if _MANAGER is None or sig != _MANAGER_SIG:
+        pm = ProviderManager()
+        if cfg.providers:
+            pm.register_many(cfg.providers)
+        else:
+            pm.register(ProviderConfig(kind="openai", label="local",
+                                       model=MODEL, base_url=LLAMA_URL))
+        _MANAGER, _MANAGER_SIG = pm, sig
+    return _MANAGER
+
+
+def chat(messages, max_tokens=2048, temperature=0.2, timeout=900, provider=None):
+    """One chat call through the provider abstraction. Returns (text, error).
+
+    Default path is ProviderManager.execute (capability-aware, with failover).
+    An explicit ``provider`` bypasses the manager for single-provider callers.
+    """
+    if provider is not None:
+        return provider.chat(messages, max_tokens=max_tokens,
+                             temperature=temperature, timeout=timeout)
+    return _manager().execute(messages, capabilities=["chat"],
+                              max_tokens=max_tokens, temperature=temperature,
+                              timeout=timeout)
 
 
 def parse_file_blocks(text, owned=None):
@@ -77,9 +109,13 @@ def parse_file_blocks(text, owned=None):
     EXTS = (".md", ".ts", ".tsx", ".js", ".json", ".py", ".go", ".sh", ".yaml", ".yml")
     for m in FENCE_RE.finditer(text):
         tok, body = m.group(2).strip(), m.group(3)
+        # some models fuse language + path into one token: "py f.py"
+        words = tok.split()
+        path = words[-1] if words else ""
         # treat the token after the language as a path only if it looks like one
-        looks_like_path = bool(tok) and ("/" in tok or tok.lower().endswith(EXTS))
-        candidates.append((tok if looks_like_path else None, body))
+        looks_like_path = bool(path) and (
+            "/" in path or path.lower().endswith(EXTS))
+        candidates.append((path if looks_like_path else None, body))
     if not candidates:
         for m in FILEMARK_RE.finditer(text):
             candidates.append((m.group(1).strip(), m.group(2)))
@@ -114,52 +150,18 @@ def parse_file_blocks(text, owned=None):
 
 
 def qa_check(path, content):
-    """Automatic verification of a written file. Returns (ok, reason)."""
+    """Language-aware verification of a written file.
+    Returns (ok, reason). Delegates to elysia.core.qa.validate_file.
+    """
     if not content or not content.strip():
         return False, "empty content"
-    ext = path.rsplit(".", 1)[-1].lower()
-    if ext == "json":
-        try:
-            json.loads(content)
-        except Exception as e:
-            return False, f"invalid JSON: {e}"
-    elif ext == "py":
-        try:
-            compile(content, path, "exec")
-        except SyntaxError as e:
-            return False, f"python syntax error: {e}"
-    elif ext in ("ts", "tsx", "js", "jsx", "go"):
-        # crude balance check (strings/comments can fool it, catches gross damage)
-        for a, b in (("{", "}"), ("(", ")"), ("[", "]")):
-            if content.count(a) - content.count(b) > 3:
-                return False, f"unbalanced {a}{b}"
-    elif ext == "md":
-        body = content.lstrip()
-        if len(body) < 30:
-            return False, "markdown too short"
-        if "TODO_FILL" in content or "<content>" in content:
-            return False, "placeholder left in file"
-        # raw JSON dumps are not markdown documents
-        if body.startswith(("{", "[")):
-            try:
-                json.loads(body)
-                return False, "raw JSON dump, not a markdown document"
-            except Exception:
-                pass
-        # real markdown starts with a heading or bulleted/titled text
-        head = "\n".join(content.splitlines()[:10])
-        if not re.search(r"^#+\s", head, re.M):
-            return False, "missing a markdown heading (start with '# ')"
-    return True, ""
+    return validate_file(path, content)
 
 
 def health():
-    """True if the local model API answers."""
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:11434/v1/models", timeout=5):
-            return True
-    except Exception:
-        return False
+    """True if ANY configured provider's API answers."""
+    pm = _manager()
+    return any(p.check_health() == "healthy" for p in pm.list())
 
 
 if __name__ == "__main__":

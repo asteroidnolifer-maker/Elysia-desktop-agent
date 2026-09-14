@@ -146,6 +146,12 @@ func applyConfigDefaults(c AgentConfig) AgentConfig {
 		} else {
 			c.WorkspaceDir = "workspace"
 		}
+	} else if !filepath.IsAbs(c.WorkspaceDir) {
+		// resolve relative workspace_dir against the executable's directory,
+		// so launching from anywhere uses the same repo-relative location
+		if exe, err := os.Executable(); err == nil {
+			c.WorkspaceDir = filepath.Join(filepath.Dir(exe), c.WorkspaceDir)
+		}
 	}
 	return c
 }

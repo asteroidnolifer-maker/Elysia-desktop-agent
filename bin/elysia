@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Elysia CLI wrapper: run `./bin/elysia <command>` from anywhere.
+# All commands are safe read-only by default; mutating ones prompt.
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec python3 "$ROOT/elysia/cli.py" "$@"

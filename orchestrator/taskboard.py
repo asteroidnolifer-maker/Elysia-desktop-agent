@@ -1,50 +1,49 @@
 #!/usr/bin/env python3
 """
-Elysia task board: shared coordination store for multiple opencode workers.
+Elysia task board: shared coordination store for multiple workers.
 
 Prevents double-work by giving each task a unique lock and tracking which
 files each worker has claimed. Workers claim a task atomically (SQLite
 transaction), so two workers can never pick the same task.
+
+This module is a backward-compatible CLI wrapper over the canonical task store
+(``elysia.core.tasks.TaskStore``) so existing callers (worker_local.py,
+server.py, adaptive.sh, monitor.py) keep working unchanged while the schema and
+lease/heartbeat semantics come from the new core.
 """
 import json
 import os
-import sqlite3
 import sys
-import time
-from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "taskboard.sqlite")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from elysia.core.tasks import TaskStore  # noqa: E402
+
+ORCH_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(ORCH_DIR, "taskboard.sqlite")
+
+_store = None
 
 
-def _now():
-    return datetime.now(timezone.utc).isoformat()
+def store() -> TaskStore:
+    global _store
+    if _store is None:
+        _store = TaskStore(DB_PATH)
+    return _store
 
 
 def connect():
+    """Backward-compat: cheap sqlite connection proxy for old callers."""
+    import sqlite3
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA busy_timeout=30000")
     con.row_factory = sqlite3.Row
     return con
 
 
 def init_db():
+    _ = store()  # creates schema
     con = connect()
     con.executescript("""
-    CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL,
-        files TEXT NOT NULL DEFAULT '[]',   -- JSON list of owned files
-        status TEXT NOT NULL DEFAULT 'open', -- open | claimed | done | failed
-        priority INTEGER NOT NULL DEFAULT 5,
-        worker TEXT,
-        session TEXT,
-        claimed_at TEXT,
-        done_at TEXT,
-        result TEXT,
-        created_at TEXT NOT NULL
-    );
     CREATE TABLE IF NOT EXISTS locks (
         path TEXT PRIMARY KEY,
         task_id INTEGER NOT NULL,
@@ -56,104 +55,81 @@ def init_db():
     con.close()
 
 
-def add_task(title, description, files=None, priority=5):
-    con = connect()
-    cur = con.execute(
-        "INSERT INTO tasks (title, description, files, priority, created_at) "
-        "VALUES (?,?,?,?,?)",
-        (title, description, json.dumps(files or []), priority, _now()),
-    )
-    con.commit()
-    tid = cur.lastrowid
-    con.close()
-    return tid
+def add_task(title, description, files=None, priority=5, read_files=None,
+             dependencies=None, max_attempts=3, kind="task", workflow=None,
+             agent_role=None, dedup_hash=None, timeout_s=None):
+    return store().add_task(
+        title, description or title, owned_files=files or [],
+        read_files=read_files or [], dependencies=dependencies or [],
+        priority=priority, max_attempts=max_attempts, kind=kind,
+        workflow=workflow, agent_role=agent_role, dedup_hash=dedup_hash,
+        timeout_s=timeout_s, status="ready" if not (dependencies or []) else "queued")
 
 
-## ---------------- atomically claim one open task, verifying file locks -----
 def claim_task(worker, max_priority=None):
+    """Claim the highest-priority ready task (dependencies satisfied).
+
+    Returns a dict with the task's fields in the LEGACY shape ('files' key, ISO
+    timestamps) so existing callers keep working.
     """
-    Atomically pick the highest-priority 'open' task whose files are not all
-    locked by other workers, claim it for this worker, and lock its files.
-    Returns a dict of the task, or None if no task is available.
-    """
-    con = connect()
-    con.execute("BEGIN IMMEDIATE")
-    try:
-        rows = con.execute(
-            "SELECT * FROM tasks WHERE status='open' "
-            "ORDER BY priority DESC, id ASC"
-        ).fetchall()
-        for row in rows:
-            files = json.loads(row["files"] or "[]")
-            # Skip if any file is already locked by another task
-            if files:
-                q = ",".join("?" for _ in files)
-                held = con.execute(
-                    f"SELECT path FROM locks WHERE path IN ({q})", files
-                ).fetchall()
-                if held:
-                    continue
-            new_status = "claimed"
-            con.execute(
-                "UPDATE tasks SET status=?, worker=?, claimed_at=? WHERE id=?",
-                (new_status, worker, _now(), row["id"]),
-            )
-            for f in files:
-                con.execute(
-                    "INSERT INTO locks (path, task_id, worker, created_at) "
-                    "VALUES (?,?,?,?)",
-                    (f, row["id"], worker, _now()),
-                )
-            con.commit()
-            return dict(row, status=new_status, worker=worker)
-        con.rollback()
+    s = store()
+    for t in s.ready_tasks():
+        if max_priority is not None and t["priority"] > max_priority:
+            continue
+        if s.claim(t["id"], worker, None, None, lease_seconds=1200):
+            return _legacy(s.get(t["id"]))
+    return None
+
+
+def _legacy(t):
+    """Convert canonical store row -> legacy CLI dict shape."""
+    if t is None:
         return None
-    finally:
-        con.close()
+    out = {k: v for k, v in t.items()}
+    out["files"] = json.dumps(out.get("owned_files") or [])
+    out["session"] = None
+    from datetime import datetime, timezone
+    for k in ("created_at", "claimed_at", "completed_at", "started_at",
+              "scheduled_at"):
+        v = out.get(k)
+        if isinstance(v, float):
+            out[k] = datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+    return out
 
 
 def finish_task(task_id, status, worker, result=None):
-    con = connect()
-    con.execute("BEGIN IMMEDIATE")
-    try:
-        files = json.loads(
-            con.execute("SELECT files FROM tasks WHERE id=?", (task_id,)).fetchone()["files"] or "[]"
-        )
-        con.execute(
-            "UPDATE tasks SET status=?, done_at=?, result=? WHERE id=? AND worker=?",
-            (status, _now(), result, task_id, worker),
-        )
-        for f in files:
-            con.execute("DELETE FROM locks WHERE path=? AND task_id=?", (f, task_id))
-        con.commit()
-    finally:
-        con.close()
+    s = store()
+    if not s.get(int(task_id)):
+        return
+    test_status = None
+    if result:
+        import re
+        m = re.search(r"jest rc=(\S+)", result)
+        if m:
+            test_status = "pass" if m.group(1) == "0" else "fail"
+    s.complete(int(task_id), status, result, test_status)
 
 
 def release_stale(worker):
     """Release all locks/tasks held by a given worker (used on worker death)."""
+    s = store()
+    s.release_all_for_worker(worker)   # table-validated claimed->ready/failed
     con = connect()
-    con.execute("BEGIN IMMEDIATE")
     try:
         con.execute("DELETE FROM locks WHERE worker=?", (worker,))
-        con.execute(
-            "UPDATE tasks SET status='open', worker=NULL "
-            "WHERE worker=? AND status='claimed'",
-            (worker,),
-        )
         con.commit()
     finally:
         con.close()
 
 
+def release_stale_safe(worker):
+    """Release expired leases AND stale worker claims (canonical path)."""
+    store().release_expired()
+    release_stale(worker)
+
+
 def list_tasks(status=None):
-    con = connect()
-    if status:
-        rows = con.execute("SELECT * FROM tasks WHERE status=?", (status,)).fetchall()
-    else:
-        rows = con.execute("SELECT * FROM tasks ORDER BY id").fetchall()
-    con.close()
-    return [dict(r) for r in rows]
+    return [_legacy(t) for t in store().list(status=status)]
 
 
 if __name__ == "__main__":
@@ -171,7 +147,7 @@ if __name__ == "__main__":
         init_db()
         status_arg = sys.argv[2] if len(sys.argv) > 2 else None
         for t in list_tasks(status_arg):
-            print(f"#{t['id']} [{t['status']:>7}] p{t['priority']} worker={t['worker']} :: {t['title']}")
+            print(f"#{t['id']} [{str(t['status']):>12}] p{t['priority']} worker={t.get('worker')} :: {t['title']}")
     elif cmd == "claim":
         init_db()
         t = claim_task(sys.argv[2])
@@ -183,5 +159,5 @@ if __name__ == "__main__":
         finish_task(int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5] if len(sys.argv) > 5 else None)
         print("finished", sys.argv[2], sys.argv[3])
     elif cmd == "release":
-        release_stale(sys.argv[2])
+        release_stale_safe(sys.argv[2])
         print("released stale for", sys.argv[2])

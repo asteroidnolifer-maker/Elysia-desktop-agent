@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"io/ioutil"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -26,7 +28,19 @@ func NewAuditLog(path string) *AuditLog {
 }
 
 // defaultAudit is the shared audit trail used by the auth guard.
-var defaultAudit = NewAuditLog("agent_audit.json")
+// The file is runtime state (never committed); relocate with ELYSIA_AUDIT_LOG.
+var defaultAudit = NewAuditLog(auditPath())
+
+func auditPath() string {
+	if p := os.Getenv("ELYSIA_AUDIT_LOG"); p != "" {
+		return p
+	}
+	base := "agent_audit.json"
+	if exe, err := os.Executable(); err == nil {
+		base = filepath.Join(filepath.Dir(exe), base)
+	}
+	return base
+}
 
 // Audit returns the shared audit log.
 func Audit() *AuditLog { return defaultAudit }

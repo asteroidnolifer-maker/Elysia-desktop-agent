@@ -34,19 +34,31 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ORCH_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ORCH_DIR)
+sys.path.insert(0, os.path.dirname(ORCH_DIR))
 REPO_ROOT = os.path.dirname(ORCH_DIR)
 WS_DIR = os.path.realpath(os.path.join(REPO_ROOT, "workspace"))
 DB_PATH = os.path.join(ORCH_DIR, "taskboard.sqlite")
 LOGS_DIR = os.path.join(ORCH_DIR, "logs")
 HUD_PATH = os.path.join(ORCH_DIR, "hud.html")
 JARVIS_JPG = os.path.expanduser("~/Downloads/jarvis.jpg")
-STACK_SH = os.path.realpath(os.path.join(ORCH_DIR, "..", "elysia-run.sh"))
+STACK_SH = os.path.realpath(os.path.join(REPO_ROOT, "elysia-run.sh"))
 ADAPTIVE = os.path.join(ORCH_DIR, "adaptive.sh")
 MONITOR = os.path.join(ORCH_DIR, "monitor.py")
 
-sys.path.insert(0, ORCH_DIR)
 import brain  # noqa: E402
 import taskboard  # noqa: E402
+from elysia.core.config import load_config  # noqa: E402
+from elysia.core.events import EventBus  # noqa: E402
+from elysia.core.providers import Provider, ProviderManager  # noqa: E402
+from elysia.core.paths import validate_file_list  # noqa: E402
+from elysia.core import git as elysia_git  # noqa: E402
+
+# Structured event bus + provider manager wired from the new core.
+EVENTS = EventBus(run_id="hud")
+PROVIDERS = ProviderManager()
+for _pc in load_config().providers:
+    PROVIDERS.register(_pc)
 
 
 def _load_rules():
@@ -60,7 +72,9 @@ def _load_rules():
 
 AGENT_RULES = _load_rules()
 
-MAX_DIVISION = 6          # subtask cap per /api/ask
+# Each subtask cap per /api/ask is no longer a hard global limit. The
+# scheduler/concurrency is resource- and provider-aware (elysia.core.scheduler).
+MAX_DIVISION = 6          # subtask cap per single /api/ask call
 DIV_PROMPT = None         # built lazily with the workspace inventory
 
 
@@ -149,13 +163,22 @@ def proc_up(pattern):
 
 
 def stack_health():
-    return {
+    h = {
         "model": model_ok(),
         "agent": agent_ok(),
         "pool": proc_up("adaptive\\.sh up"),
         "monitor": proc_up("monitor\\.py"),
         "stack_up": agent_ok() and model_ok(),
     }
+    # provider manager health (any provider not just the default model port)
+    h["providers"] = PROVIDERS.health_report()
+    for p in PROVIDERS.list():
+        if p.name == "local" or p.cfg.model:
+            p.check_health()
+    h["providers"] = PROVIDERS.health_report()
+    h["provider_healthy"] = any(p.status == "healthy"
+                                for p in PROVIDERS.list()) if PROVIDERS.list() else False
+    return h
 
 
 ## ----------------------------- agents -----------------------------
@@ -638,6 +661,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._api_tasks(q))
         if path == "/api/agents":
             return self._send(200, {"ok": True, "agents": agents_payload()})
+        if path == "/api/providers":
+            return self._send(200, self._api_providers())
+        if path == "/api/events":
+            return self._send(200, self._api_events(q))
         if path == "/api/agent-log":
             wid = (q.get("worker") or [""])[0]
             n = int((q.get("n") or ["30"])[0])
@@ -690,6 +717,7 @@ class Handler(BaseHTTPRequestHandler):
     def _api_state(self):
         counts = board_counts()
         agents = agents_payload()
+        EVENTS.emit("api_state", status="ok")
         return {
             "ok": True,
             "time": now_iso(),
@@ -711,6 +739,14 @@ class Handler(BaseHTTPRequestHandler):
     def _api_agents(self):
         return {"ok": True, "agents": agents_payload()}
 
+    def _api_providers(self):
+        return {"ok": True, "providers": stack_health().get("providers", [])}
+
+    def _api_events(self, q):
+        n = min(int((q.get("n") or ["100"])[0]), 500)
+        et = ((q.get("type") or [""])[0]) or None
+        return {"ok": True, "events": EVENTS.recent(n=n, event_type=et)}
+
     def _api_ask(self, body):
         goal = str(body.get("goal") or "").strip()
         if len(goal) < 8:
@@ -723,6 +759,7 @@ class Handler(BaseHTTPRequestHandler):
         added, err, pool_msg = queue_goal(goal, files_hint)
         if added is None:
             return self._send(502, {"ok": False, "error": err})
+        EVENTS.emit("goal_queued", status="ok", detail=f"{len(added)} tasks")
         return self._send(200, {"ok": True, "added": added, "pool": pool_msg,
                                 "note": "subtasks queued on the board; "
                                         "agents will pick them up"})
@@ -731,8 +768,10 @@ class Handler(BaseHTTPRequestHandler):
         action = body.get("action")
         if action == "start":
             cap = max(1, min(int(body.get("cap") or 2), 4))
+            EVENTS.emit("pool_start", status="ok", detail=f"cap={cap}")
             return self._send(200, start_pool(cap))
         if action == "stop":
+            EVENTS.emit("pool_stop", status="ok")
             return self._send(200, stop_pool())
         return self._send(400, {"ok": False,
                                 "error": "action must be start|stop"})
@@ -743,11 +782,17 @@ class Handler(BaseHTTPRequestHandler):
         files = body.get("files") or []
         if isinstance(files, str):
             files = [f.strip() for f in files.split(",") if f.strip()]
-        files = [f for f in files if isinstance(f, str) and f and ".." not in f]
+        # SECURITY: validate every owned path canonically (traversal/abs rejected).
+        try:
+            files = validate_file_list(WS_DIR, files)
+        except Exception as e:
+            return self._send(400, {"ok": False,
+                                    "error": f"invalid file path: {e}"})
         if not title or not files:
             return self._send(400, {"ok": False,
                                     "error": "title and >=1 owned file required"})
         tid = taskboard.add_task(title, desc, files, priority=5)
+        EVENTS.emit("task_added", task_id=tid, status="open")
         log(f"/api/task -> added #{tid} {title[:60]}")
         return self._send(200, {"ok": True, "added": [task_by_id(tid)]})
 
@@ -788,35 +833,17 @@ class Handler(BaseHTTPRequestHandler):
                                     "reply": f"Goal split into {len(added)} "
                                               f"task(s) and queued — agents "
                                               f"({pool_msg})."})
-        if intent == "elysia":
-            try:
-                sys.path.insert(0, os.path.join(WS_DIR, "tools"))
-                from elysia_agent import process_request
-                import threading
-                result_holder = [None]
-                def run_agent():
-                    result_holder[0] = process_request(message)
-                t = threading.Thread(target=run_agent, daemon=True)
-                t.start()
-                t.join(timeout=90)
-                if result_holder[0]:
-                    r = result_holder[0]
-                    reply = f"Agent completed task #{r.get('task_id', '?')} ({r.get('type', 'unknown')})\n"
-                    for step, res in r.get("results", {}).items():
-                        if isinstance(res, dict) and "error" not in res:
-                            reply += f"  ✓ {step}\n"
-                        else:
-                            reply += f"  ✗ {step}: {str(res)[:80]}\n"
-                    return self._send(200, {"ok": True, "type": "text",
-                                            "intent": "elysia", "reply": reply})
-                else:
-                    return self._send(200, {"ok": True, "type": "text",
-                                            "intent": "elysia",
-                                            "reply": "Agent started working on your request. Check the task board for progress."})
-            except Exception as e:
-                return self._send(200, {"ok": True, "type": "text",
-                                        "intent": "elysia",
-                                        "reply": f"Agent error: {str(e)[:200]}"})
+        if intent in ("elysia", "research"):
+            from elysia.core import server_api
+            if intent == "research" or message.lower().startswith(
+                    ("research ", "deep research", "investigate", "find out about")):
+                res = server_api.deep_research(message)
+            else:
+                res = server_api.run_chat(message)
+            return self._send(200, {"ok": True, "type": "text",
+                                    "intent": intent,
+                                    "reply": res.get("reply", ""),
+                                    "status": res.get("status", "done")})
         # general question -> local model
         reply = general_chat(message, history)
         return self._send(200, {"ok": True, "type": "text",
@@ -824,28 +851,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
     def _api_agent(self, body):
-        """Elysia master agent endpoint - executes any task."""
+        """Elysia master agent endpoint - runs a goal through the core engine."""
         task = str(body.get("task") or body.get("message") or "").strip()
         if len(task) < 3:
             return self._send(400, {"ok": False, "error": "task too short"})
         log(f"/api/agent task: {task[:120]}")
         try:
-            sys.path.insert(0, os.path.join(WS_DIR, "tools"))
-            from elysia_agent import process_request
-            import threading
-            result_holder = [None]
-            def run_agent():
-                result_holder[0] = process_request(task)
-            t = threading.Thread(target=run_agent, daemon=True)
-            t.start()
-            t.join(timeout=120)
-            if result_holder[0] is None:
-                return self._send(200, {"ok": True, "status": "running",
-                                        "reply": f"Agent started on: {task}. Check back for results."})
-            return self._send(200, {"ok": True, "status": "done",
-                                    "result": result_holder[0]})
+            from elysia.core import server_api
+            res = server_api.run_agent(task, timeout_s=20)
+            return self._send(200, {"ok": True, "status": res.get("status", "done"),
+                                    "reply": res.get("reply", ""),
+                                    "result": res.get("detail")})
         except Exception as e:
-            return self._send(500, {"ok": False, "error": str(e)})
+            EVENTS.emit("agent_error", status="error", error=str(e)[:200])
+            return self._send(200, {"ok": False, "status": "error",
+                                    "reply": f"Agent error: {str(e)[:200]}"})
 
 
 def main():

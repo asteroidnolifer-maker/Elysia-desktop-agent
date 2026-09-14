@@ -10,16 +10,18 @@ and workers all run on `127.0.0.1`.
 | Path | What it is |
 |---|---|
 | `agent-core/` | Go daemon (default listen `:8085`). HTTP API + sandbox + thermal/power managers. Build with `go build`. Config: `agent-core/agent_config.json`. |
-| `orchestrator/` | Python control layer (stdlib only). `server.py` HUD + JSON API (default `--port 8087`), `adaptive.sh` worker pool, `worker_local.py` agents, `taskboard.py` SQLite board (`orchestrator/taskboard.sqlite`), `brain.py` / `ask.sh` local-LLM chat, `airllm.py` model launcher, `monitor.py`, `hud.html`. |
+| `orchestrator/` | Python control layer (stdlib only). `server.py` HUD + JSON API (default `--port 8087`), `adaptive.sh` worker pool, `worker_local.py` agents, `taskboard.py` (canonical `elysia.core.tasks` store), `brain.py` / `ask.sh` LLM chat (multi-provider), `airllm.py` model launcher, `monitor.py`, `hud.html`. |
+| `elysia/` | Rearchitected core package: `core/config.py`, `core/paths.py` (secure path resolution), `core/providers.py`, `core/tasks.py`, `core/scheduler.py`, `core/qa.py`, `core/events.py`, `core/git.py`, `core/workspace.py` + more. `elysia/config.json` is the single source of configuration. |
+| `docs/` | `ARCHITECTURE_AUDIT.md` (Phase 1 audit), `ARCHITECTURE.md` (target architecture), `IMPLEMENTATION_STATE.md` (status of the rearchitecture). |
+| `tests/` | `python3 -m unittest discover -s tests` — 29 unit tests (paths/security, providers, scheduler, QA, redaction, worker write security). |
 | `runtime/` | Local inference runtime (**not committed**: binaries/models). `restore-model.sh` downloads `llama-server` + Qwen GGUF into `runtime/llama/` + `runtime/models/`. |
 | `elysia-android/` | Android app (Gradle, AGP `8.13.2`, Kotlin `2.2.21`). Modules: `:app`, `:core`, `:device`, `:installer`, `:runtime`, `:models`, `:diagnostics`, `:permissions`. |
 | `workspace/` | Generated projects, `tools/` scripts, `docs/` notes. `workspace/repos/` (cloned test projects), `*.db`, `*.log`, `cache/` are git-ignored. |
 | `scripts/` | Task-board generators (`generate_*.py`, `gen_unique_tasks.py`). Run manually as needed. |
 | `config/` | Local secrets (**never committed**, see `.gitignore`). Example: `config/composio.env`. |
-| `elysia-run.sh` | Unified launcher: starts `llama-server` (`:11434`) + `agent-core` (`:8085`). `start\|stop\|status\|restart`. **Check the hardcoded paths at the top of the script before use** (`MODEL_DIR`, `LLAMA_BIN`, `AGENT_DIR`, `WORKSPACE`). |
+| `elysia-run.sh` | Unified launcher: starts `llama-server` (`:11434`) + `agent-core` (`:8085`). `start\|stop\|status\|restart`. Paths derive from the repo root; override with `ELYSIA_MODEL`, `ELYSIA_RUNTIME`, `ELYSIA_WS`, `ELYSIA_AGENT_BIN`. |
 | `elysia-home/` | Notes about the working-copy location (`.readme`). |
 | `dist/` | Build output (git-ignored). |
-| `Elysia Desktop.zip` | Legacy binary bundle already on `main` (kept for history). |
 
 ## Prerequisites
 
@@ -119,7 +121,8 @@ ELYSIA_MODEL=/path/to/model.gguf ./elysia-run.sh start
 ./elysia-run.sh stop
 ```
 
-> Note: `elysia-run.sh` has absolute paths baked in (`/data/Elysia/...`, `/data/elysia-run/...`).
+> Note: `elysia-run.sh` derives every path from the repository root and respects
+> `ELYSIA_MODEL`, `ELYSIA_RUNTIME`, `ELYSIA_WS`, `ELYSIA_AGENT_BIN` overrides.
 > If `start` reports `llama-server not found` / `agent-core not built`, either edit those variables
 > or start the two processes manually (next section).
 
@@ -235,7 +238,7 @@ Keep your `config/composio.env`, API keys, and `.gguf` files local only.
 
 ## Troubleshooting
 
-- `llama-server not found` / `agent-core not built` from `elysia-run.sh` → hardcoded paths; edit the top of the script or use the manual start above.
+- `llama-server not found` / `agent-core not built` from `elysia-run.sh` → set `ELYSIA_LLAMA_BIN` / `ELYSIA_AGENT_BIN` / `ELYSIA_MODEL` to the real locations, or use the manual start above.
 - `agent-core` binds `:8085` already in use → `lsof -i :8085`, or `ELYSIA_HTTP_ADDR=":8086" ./elysia-agent`.
 - `Model not found` → `ls runtime/models/`, check `agent_config.json` URLs point at `:11434`, run `python3 orchestrator/airllm.py status`.
 - `llama-server` OOM → smaller model (`qwen1.5b`), lower `--ctx-size`, fewer `--parallel`.
