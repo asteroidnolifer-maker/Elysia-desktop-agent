@@ -110,6 +110,11 @@ def finish_task(task_id, status, worker, result=None):
     s.complete(int(task_id), status, result, test_status)
 
 
+def heartbeat_task(task_id, worker, lease_seconds=1200):
+    """Extend a worker's lease while it is still alive (canonical path)."""
+    return store().heartbeat(int(task_id), worker, lease_seconds)
+
+
 def release_stale(worker):
     """Release all locks/tasks held by a given worker (used on worker death)."""
     s = store()
@@ -161,3 +166,9 @@ if __name__ == "__main__":
     elif cmd == "release":
         release_stale_safe(sys.argv[2])
         print("released stale for", sys.argv[2])
+    elif cmd == "heartbeat":
+        # heartbeat <task_id> <worker> [lease_seconds]
+        ok = heartbeat_task(int(sys.argv[2]), sys.argv[3],
+                            int(sys.argv[4]) if len(sys.argv) > 4 else 1200)
+        print("heartbeat", "ok" if ok else "lost")
+        sys.exit(0 if ok else 1)

@@ -27,6 +27,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from urllib.parse import parse_qs
@@ -52,6 +53,8 @@ from elysia.core.config import load_config  # noqa: E402
 from elysia.core.events import EventBus  # noqa: E402
 from elysia.core.providers import Provider, ProviderManager  # noqa: E402
 from elysia.core.paths import validate_file_list  # noqa: E402
+from elysia.core.resources import ResourceManager  # noqa: E402
+from elysia.core.scheduler import Scheduler  # noqa: E402
 from elysia.core import git as elysia_git  # noqa: E402
 
 # Structured event bus + provider manager wired from the new core.
@@ -562,12 +565,23 @@ def queue_goal(goal, files_hint=None):
         return None, err, None
     subs = apply_output_target(goal, subs)
     added = []
+    store = taskboard.store()
     for s in subs:
         tid = taskboard.add_task(s["title"], s["description"], s["files"],
                                  priority=5)
         added.append({"id": tid, **s})
+        EVENTS.emit("task.created", task_id=tid, status="queued",
+                    detail=s["title"][:200],
+                    files=s["files"])
     log(f"queue_goal -> added {len(added)}: " +
         ", ".join(f"#{a['id']}" for a in added))
+    # Durable workflow: the task rows ARE the state; the canonical scheduler
+    # (started with the server) owns recovery. Keep the legacy adaptive pool
+    # for local-model execution.
+    try:
+        start_scheduler_thread()
+    except Exception as e:  # noqa: BLE001
+        log(f"scheduler start failed (non-fatal): {e}")
     pool_msg = start_pool(cap=2).get("msg") if model_ok() else None
     return added, "", pool_msg
 
@@ -592,6 +606,77 @@ def divide_goal(goal, files_hint=None):
     if not subs:
         return None, "division produced no valid subtasks (each needs owned files)."
     return subs, ""
+
+
+## ----------------------------- scheduler -----------------------------
+# The canonical scheduler (elysia.core.scheduler.Scheduler) runs IN this server
+# process. Its maintenance loop is the single authority for lease expiry,
+# timeout enforcement, dependency-failure propagation and stale-worker release
+# — so a crashed worker's task is recovered automatically instead of blocking
+# the board for the full lease duration.
+SCHEDULER = None
+_SCHEDULER_T = None
+_SCHED_STOP = None
+
+
+def ensure_scheduler():
+    """Start the canonical scheduler (idempotent). Returns the scheduler."""
+    global SCHEDULER, _SCHEDULER_T, _SCHED_STOP
+    if SCHEDULER is not None:
+        return SCHEDULER
+    from elysia.core.resources import ResourceManager as _RM
+    from elysia.core.scheduler import Scheduler as _Sched
+    from elysia.core.config import load_config as _load_cfg
+    SCHEDULER = _Sched(taskboard.store(), PROVIDERS, EVENTS,
+                       cfg=_load_cfg(), worker_id="hud-server",
+                       resources=_RM())
+    _SCHED_STOP = SCHEDULER._stop
+    SCHEDULER.start()
+    EVENTS.emit("scheduler", status="started")
+    log("canonical scheduler started (leases, timeouts, dep-failure recovery)")
+    return SCHEDULER
+
+
+def scheduler_maintenance_now():
+    """Run one maintenance pass synchronously (used by tests and /api/scheduler)."""
+    s = ensure_scheduler()
+    s.maintenance()
+    return s
+
+
+## ----------------------------- scheduler thread (managed lifecycle) ---
+def _scheduler_loop():
+    """Managed maintenance loop with restart-on-crash (server-owned lifetime)."""
+    backoff = 1.0
+    while not (_SCHED_STOP and _SCHED_STOP.is_set()):
+        try:
+            SCHEDULER.maintenance()
+            backoff = 1.0
+        except Exception as e:  # noqa: BLE001
+            log(f"scheduler maintenance error: {e}; restarting in {backoff:.0f}s")
+            EVENTS.emit("scheduler", status="error", error=str(e)[:300])
+            _SCHED_STOP.wait(backoff)
+            backoff = min(backoff * 2, 30)
+        _SCHED_STOP.wait(5)
+
+
+def start_scheduler_thread():
+    """Server-owned maintenance thread (daemon but supervised by _loop)."""
+    s = ensure_scheduler()
+    s._stop.clear()          # allow start/stop/start cycles (tests, restarts)
+    global _SCHEDULER_T
+    if _SCHEDULER_T is None or not _SCHEDULER_T.is_alive():
+        _SCHEDULER_T = threading.Thread(target=_scheduler_loop,
+                                        name="elysia-scheduler", daemon=True)
+        _SCHEDULER_T.start()
+    return _SCHEDULER_T
+
+
+def stop_scheduler():
+    """Stop the scheduler cleanly (used by tests and shutdown)."""
+    if SCHEDULER is not None:
+        SCHEDULER.stop()
+        EVENTS.emit("scheduler", status="stopped")
 
 
 ## ----------------------------- pool -----------------------------
@@ -665,6 +750,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, self._api_providers())
         if path == "/api/events":
             return self._send(200, self._api_events(q))
+        if path == "/api/scheduler":
+            s = SCHEDULER
+            counts = taskboard.store().counts()
+            blocked = len(taskboard.store().blocked_tasks())
+            return self._send(200, {
+                "ok": True,
+                "running": bool(s),
+                "workers": s.workers.list() if s else [],
+                "max_concurrency": s.max_concurrency if s else None,
+                "budget": s.current_budget() if s else None,
+                "counts": counts,
+                "blocked": blocked,
+            })
         if path == "/api/agent-log":
             wid = (q.get("worker") or [""])[0]
             n = int((q.get("n") or ["30"])[0])
@@ -687,6 +785,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_pool(body)
         if path == "/api/task":
             return self._api_task(body)
+        if path == "/api/task/cancel":
+            tid = int(body.get("id") or 0)
+            if tid <= 0:
+                return self._send(400, {"ok": False, "error": "id required"})
+            affected = (SCHEDULER.cancel(tid, by="user")
+                        if SCHEDULER else taskboard.store().cancel(tid))
+            return self._send(200, {"ok": True, "cancelled": affected})
         if path == "/api/chat":
             return self._api_chat(body)
         if path == "/api/agent":
@@ -861,7 +966,11 @@ class Handler(BaseHTTPRequestHandler):
             res = server_api.run_agent(task, timeout_s=20)
             return self._send(200, {"ok": True, "status": res.get("status", "done"),
                                     "reply": res.get("reply", ""),
-                                    "result": res.get("detail")})
+                                    "result": res.get("detail"),
+                                    "scheduler": {
+                                        "workers": SCHEDULER.workers.list() if SCHEDULER else [],
+                                        "counts": taskboard.store().counts(),
+                                    }})
         except Exception as e:
             EVENTS.emit("agent_error", status="error", error=str(e)[:200])
             return self._send(200, {"ok": False, "status": "error",
@@ -875,6 +984,12 @@ def main():
     args = ap.parse_args()
     taskboard.init_db()
     os.makedirs(LOGS_DIR, exist_ok=True)
+    # Canonical scheduler: lease expiry / timeouts / dep-failure recovery run
+    # for the server's whole lifetime (restart-safe: state is in SQLite).
+    try:
+        start_scheduler_thread()
+    except Exception as e:  # noqa: BLE001
+        log(f"scheduler failed to start (server continues): {e}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     log(f"HUD listening on http://{args.host}:{args.port}  "
         f"(workspace={WS_DIR}, model={'UP' if model_ok() else 'DOWN'})")

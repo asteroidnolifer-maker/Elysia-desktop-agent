@@ -353,19 +353,24 @@ class TaskStore:
     def release_expired(self, max_attempts: int = 3) -> list[int]:
         """Reopen claimed tasks whose lease expired without heartbeat.
 
+        Each task's OWN ``max_attempts`` column is authoritative (the global
+        ``max_attempts`` is only a default for rows missing it), so a task
+        created with a smaller retry budget terminates instead of looping.
+
         Only performs table-legal transitions (claimed/running/testing/
         reviewing/retrying -> ready|failed). Returns released task ids.
         """
         con = self._connect()
         now = time.time()
         rows = con.execute(
-            "SELECT id, status, attempts FROM tasks WHERE status IN "
+            "SELECT id, status, attempts, max_attempts FROM tasks WHERE status IN "
             "('claimed','running','testing','reviewing','retrying') "
             "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?",
             (now,)).fetchall()
         out = []
         for r in rows:
-            target = self._lease_outcome(r["attempts"], max_attempts)
+            eff_max = r["max_attempts"] if r["max_attempts"] else max_attempts
+            target = self._lease_outcome(r["attempts"], eff_max)
             if not status_transition(r["status"], target):
                 continue  # not a table-legal move — leave untouched
             if target == "failed":
@@ -390,11 +395,12 @@ class TaskStore:
         con = self._connect()
         now = time.time()
         rows = con.execute(
-            "SELECT id, status, attempts FROM tasks WHERE worker=?",
+            "SELECT id, status, attempts, max_attempts FROM tasks WHERE worker=?",
             (worker,)).fetchall()
         out = []
         for r in rows:
-            target = self._lease_outcome(r["attempts"], max_attempts)
+            eff_max = r["max_attempts"] if r["max_attempts"] else max_attempts
+            target = self._lease_outcome(r["attempts"], eff_max)
             if not status_transition(r["status"], target):
                 continue
             if target == "failed":

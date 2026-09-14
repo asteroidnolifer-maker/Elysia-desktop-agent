@@ -14,8 +14,33 @@ python3 -m unittest discover -s tests -v
 
 Expected: **all tests pass** — the original 88 plus the new
 `tests/test_providers_plus.py` bundle (provider presets, config integration,
-prompt styles, browser login store, knowledge base, HuggingFace catalog).
-No key, no network, no model required.
+prompt styles, browser login store, knowledge base, HuggingFace catalog) and
+the `tests/test_runtime_wiring.py` bundle (scheduler-in-server crash recovery,
+worker lease heartbeat, provider failover on timeout/429/unavailable/crash,
+concurrency=1 isolation, resource-queue budget gate, symlink-escape and
+invalid-tool-argument rejection). No key, no network, no model required.
+
+### 1b. Runtime failure-mode checks (spot-check the wiring)
+
+```bash
+# The canonical scheduler runs inside the HUD server; ask it for state:
+python3 orchestrator/server.py &            # start HUD
+sleep 1
+curl -s localhost:8087/api/scheduler        # {"ok":true,"running":true,...}
+
+# A crashed worker's task is recovered (lease expiry -> ready, not stuck):
+python3 orchestrator/taskboard.py add demo "crash demo" demo.md
+python3 orchestrator/taskboard.py claim ghost-worker
+python3 - <<'EOF'
+import sqlite3, time
+c = sqlite3.connect('orchestrator/taskboard.sqlite')
+c.execute("UPDATE tasks SET lease_expires_at=? WHERE status='claimed'",
+          (time.time()-1,)); c.commit()
+EOF
+python3 orchestrator/taskboard.py list   # after a scheduler pass: back to ready
+curl -s -X POST localhost:8087/api/task/cancel -d '{"id":1}'
+kill %1
+```
 
 ---
 

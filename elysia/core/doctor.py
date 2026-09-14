@@ -84,15 +84,58 @@ def check_git_repo(root: str) -> tuple[bool, list[str]]:
     return True, []
 
 
+def check_taskboard(db_path: str) -> tuple[bool, list[str]]:
+    """Task-board health: corrupt schema, expired leases, stuck tasks.
+
+    Detects the classic crash-recovery failure modes:
+      - tasks claimed with an EXPIRED lease (worker died mid-task)
+      - tasks claimed/running for far longer than any sane timeout
+    These are exactly what the canonical scheduler's maintenance loop repairs;
+    if this check fails, the scheduler isn't running (or can't reach the DB).
+    """
+    problems = []
+    if not os.path.exists(db_path):
+        return True, []   # no board yet — not a problem
+    try:
+        from .tasks import TaskStore
+        store = TaskStore(db_path)
+    except Exception as e:  # noqa: BLE001
+        return False, [f"task board unreadable ({e})"]
+    import time as _t
+    now = _t.time()
+    expired = 0
+    stuck = 0
+    for t in store.list(limit=1000):
+        if t["status"] in ("claimed", "running", "testing", "reviewing"):
+            lease = t.get("lease_expires_at")
+            started = t.get("started_at") or 0
+            if lease and lease < now:
+                expired += 1
+            elif started and now - started > 24 * 3600:
+                stuck += 1
+    if expired:
+        problems.append(
+            f"{expired} task(s) hold expired leases (worker crash? scheduler "
+            "maintenance not running?)")
+    if stuck:
+        problems.append(
+            f"{stuck} task(s) claimed for >24h (stuck; needs cancel or retry)")
+    return not problems, problems
+
+
 def run_all(cfg=None, workspace_root: str = "", repo_root: str = "") -> list[dict]:
     from .config import load_config, repo_root as cfg_repo_root
     cfg = cfg or load_config()
+    import os as _os
+    orch_db = _os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), "orchestrator", "taskboard.sqlite")
     checks = [
         ("workspace", check_workspace_secure(workspace_root or cfg.workspace.root)),
         ("providers", check_providers(cfg)),
         ("api_port", check_api_port(cfg.api.host, cfg.api.port)),
         ("python_deps", check_python_deps()),
         ("git", check_git_repo(repo_root or cfg_repo_root())),
+        ("taskboard", check_taskboard(orch_db)),
     ]
     return [{"name": name, "ok": ok, "problems": problems}
             for name, (ok, problems) in checks]

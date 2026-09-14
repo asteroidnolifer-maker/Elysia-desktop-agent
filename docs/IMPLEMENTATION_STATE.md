@@ -100,6 +100,14 @@ No third-party dependencies (Python 3 stdlib + SQLite).
   the Go sandbox internals are out of scope for this branch (unchanged).
 - Keyboard-interactive auth, cloud/webhooks, and provider API keys are left to the
   operator via `config/` + env (never committed).
-- The scheduler is plumbed and unit-tested in isolation; wiring it as the live
-  dispatch loop in `adaptive.sh`/`monitor.py` is deferred until the model runtime
-  is present on this machine (no llama-server installed in this environment).
+- The canonical scheduler now runs as a server-owned maintenance thread
+  (`orchestrator/server.py:start_scheduler_thread`): it repairs crashed workers
+  (lease expiry → ready/failed by the task's OWN `max_attempts`), releases
+  stale-worker claims, enforces timeouts, and propagates dependency failures.
+  Workers renew their lease during long model calls (`worker_local._heartbeat_loop`
+  + `taskboard.py heartbeat`). Crash-recovery / failover / resource-queueing /
+  symlink-escape tests: `tests/test_runtime_wiring.py`. Doctor now reports
+  expired leases and stuck tasks (`taskboard` check).
+- Still deferred: live in-process task execution via `Scheduler.execute_claimed`
+  (the `adaptive.sh` worker pool remains the model execution path until a model
+  runtime is validated on the target machine).

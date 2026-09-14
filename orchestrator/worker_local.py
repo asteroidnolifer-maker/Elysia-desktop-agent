@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -224,6 +225,32 @@ def tb(*args):
     return r.stdout.strip()
 
 
+def _heartbeat_loop(task_id, worker, stop_evt, interval_s=120):
+    """Keep this task's lease alive while the model call runs.
+
+    A long model call (up to 900s) must never lose its lease to the
+    scheduler's expiry sweep — losing it means another worker re-claims and
+    double-executes the task. 120s interval << 1200s lease: three missed
+    heartbeats still recover a genuinely crashed worker.
+    """
+    while not stop_evt.wait(interval_s):
+        try:
+            ok = tb("heartbeat", str(task_id), worker, "1200")
+            if not ok:
+                # Lease was taken away (scheduler recovery) — stop renewing.
+                return
+        except Exception:
+            return
+
+
+def _start_heartbeat(task_id, worker):
+    stop_evt = threading.Event()
+    t = threading.Thread(target=_heartbeat_loop,
+                         args=(task_id, worker, stop_evt), daemon=True)
+    t.start()
+    return stop_evt
+
+
 def build_prompt(task, ws_dir):
     files = task.get("files") or []
     files_str = ", ".join(files) if files else "any appropriate files"
@@ -265,6 +292,15 @@ def run_jest(ws_dir, test_files):
 def run_task(worker, task, ws_dir):
     tid = task["id"]
     ws = Workspace(ws_dir)   # secure workspace (canonical root)
+    hb_stop = _start_heartbeat(tid, worker)   # lease kept alive during calls
+    try:
+        return _run_task_inner(worker, task, ws_dir, ws)
+    finally:
+        hb_stop.set()   # stop renewing the lease the moment we finish/fail
+
+
+def _run_task_inner(worker, task, ws_dir, ws):
+    tid = task["id"]
     # taskboard returns 'files' as a JSON-encoded string — normalize it.
     raw_files = task.get("files") or []
     if isinstance(raw_files, str):

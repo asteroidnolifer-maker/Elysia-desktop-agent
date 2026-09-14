@@ -9,7 +9,7 @@ Run these in order; the whole envelope must stay green.
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all tests pass** (currently 118), including the
+Expected: **all tests pass** (currently 137), including the
 `tests/test_features.py` bundle covering context budgeting, telemetry/cost,
 tool risk gating, computer permissions + shell gating, skills risk assessment
 (intent-based, false-positive free), templates expansion, research engine
