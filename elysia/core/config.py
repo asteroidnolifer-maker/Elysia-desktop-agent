@@ -47,6 +47,7 @@ class SchedulerConfig:
     worker_est_mb: int = 600
     timeout_default_s: int = 0          # 0 = no default per-task timeout
     dedup_enabled: bool = True
+    retry_backoff_s: float = 30         # wait before a failed task re-claims
 
 
 @dataclass

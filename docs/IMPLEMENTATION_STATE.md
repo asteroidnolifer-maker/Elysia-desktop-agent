@@ -108,6 +108,16 @@ No third-party dependencies (Python 3 stdlib + SQLite).
   + `taskboard.py heartbeat`). Crash-recovery / failover / resource-queueing /
   symlink-escape tests: `tests/test_runtime_wiring.py`. Doctor now reports
   expired leases and stuck tasks (`taskboard` check).
-- Still deferred: live in-process task execution via `Scheduler.execute_claimed`
-  (the `adaptive.sh` worker pool remains the model execution path until a model
-  runtime is validated on the target machine).
+- LIVE in-process execution is wired: `elysia/core/executor.py:TaskExecutor`
+  claims budgeted tasks through the scheduler (atomic provider reservation) and
+  runs `AgentPipeline.solve_task` in-process — logical agents as pipeline stages,
+  provider failover mid-task, real Workspace writes with the owned-file security
+  gate, language-aware QA, retry-with-backoff by the task's own `max_attempts`,
+  lease heartbeat during model calls. Server integration: health-gated start,
+  periodic re-probe when a provider comes online, `POST /api/executor
+  {action:start|stop|status}` and executor state on `GET /api/scheduler`.
+  End-to-end tests (goal → dispatch → failover → file on disk → QA →
+  completion, plus retry/exhaustion/dependency-ordering/parallelism/restart):
+  `tests/test_e2e_executor.py`. The `adaptive.sh` worker pool remains as a
+  compatibility execution path; both compete for tasks via the same atomic
+  claim, so no task is double-executed.

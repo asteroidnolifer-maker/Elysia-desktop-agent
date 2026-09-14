@@ -84,7 +84,7 @@ class IntegrationTestCase(unittest.TestCase):
         # 2) scheduler dispatch reserves one provider slot
         pm = ProviderManager()
         p = fake_provider(pm, "a", [(
-            provider_block("gc.py", "def gc():\n    return 1\n"), "")])
+            provider_block("utils/gc.py", "def gc():\n    return 1\n"), "")])
         events = EventBus()
         sched = self._scheduler(store, pm, events)
         claimed = sched.dispatch_once(max_tasks=2)
@@ -92,10 +92,12 @@ class IntegrationTestCase(unittest.TestCase):
         self.assertEqual(p.cfg.label, "a")
         # slot IS held until finish (no double claim of the same slot)
         self.assertIn(claimed[0]["id"], sched._reserved)
-        # 3) in-process execution writes the real file
+        # 3) in-process execution writes the real file (the fixture's owned
+        # file is utils/gc.py, so the provider block must use that exact path:
+        # the pipeline REJECTS out-of-scope paths instead of remapping them)
         outcome = sched.execute_claimed(claimed[0], ws)
         self.assertTrue(outcome["ok"], outcome)
-        gc_path = os.path.join(ws, "gc.py")
+        gc_path = os.path.join(ws, "utils/gc.py")
         self.assertTrue(os.path.exists(gc_path))
         with open(gc_path) as f:
             self.assertEqual(f.read(), "def gc():\n    return 1\n")

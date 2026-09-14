@@ -557,7 +557,10 @@ class TaskStore:
     def _deps_ready(self, deps: list) -> bool:
         if not deps:
             return True
-        allowed = {"done"}
+        # Both success terminal states satisfy a dependency: the canonical
+        # executor completes tasks as "completed", while legacy callers
+        # (taskboard CLI) finish them as "done".
+        allowed = {"done", "completed"}
         placeholders = ",".join("?" for _ in deps)
         con = self._connect()
         rows = con.execute(

@@ -215,6 +215,11 @@ class Scheduler:
         if res is not None:
             res.release()
 
+    def reservation_for(self, task_id: int):
+        """The held ProviderReservation for a claimed task, if any."""
+        with self._reserved_mu:
+            return self._reserved.get(task_id)
+
     @staticmethod
     def _role_caps(role):
         mapping = {
@@ -277,26 +282,28 @@ class Scheduler:
 
         Runs the AgentPipeline stage chain (implementer -> QA -> tester ->
         reviewer) against the real Workspace, reusing the provider slot the
-        scheduler reserved at dispatch time. On success the task is completed;
-        on provider/QA failure it is failed (retry/backoff policy applies).
+        scheduler reserved at dispatch time. ALWAYS resolves the task at the
+        end: completed on success; failed/retrying on pipeline failure or
+        exception (the retry/backoff policy then applies) — an externally
+        claimed task (no held reservation) is finished the same way, so no
+        task is ever left stuck mid-flight.
         Returns {"ok", "status", "result"}.
         """
         from .agents import AgentPipeline
 
         tid = task.get("id")
-        with self._reserved_mu:
-            res = self._reserved.get(tid)
+        res = self.reservation_for(tid)
         pipeline = AgentPipeline(self.providers, self.store, events=self.events,
                                  cfg=self.cfg)
-        if res is None:
-            # not scheduled by us (external claim) — self-accounting reserve
+        try:
             outcome = pipeline.solve_task(task, workspace_root,
-                                          reservation=None,
+                                          reservation=res,
                                           run_tests=run_tests)
-        else:
-            outcome = pipeline.solve_task(task, workspace_root, reservation=res,
-                                          run_tests=run_tests)
-            self.finish(tid, self.worker_id,
-                        "completed" if outcome.get("ok") else "failed",
-                        outcome.get("result") or outcome.get("error") or "")
+        except Exception as e:  # noqa: BLE001 — never leave the task mid-air
+            outcome = {"ok": False, "error": f"pipeline exception: "
+                                              f"{type(e).__name__}: {e}"}
+        ok = bool(outcome.get("ok"))
+        self.finish(tid, self.worker_id,
+                    "completed" if ok else "failed",
+                    outcome.get("result") or outcome.get("error") or "")
         return outcome

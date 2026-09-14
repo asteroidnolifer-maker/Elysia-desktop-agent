@@ -154,6 +154,13 @@ class AgentPipeline:
         files = parse_file_blocks(text, owned)
         written, qa_failures = [], []
         for path, content in files.items():
+            # SECURITY: the model may emit a path outside the task's owned
+            # set (mislabeled fence, traversal, another task's file). Never
+            # silently remap or accept it — reject the file, fail QA loudly
+            # (same hard rule as worker_local).
+            if owned and path not in owned:
+                qa_failures.append(f"{path}: not in owned files")
+                continue
             try:
                 ws.write_owned(path, content)
                 written.append(path)
@@ -207,11 +214,15 @@ class AgentPipeline:
     def _stage_fail(self, tid, status, reason):
         if tid is not None:
             try:
-                self.store.fail_attempt(tid, reason, backoff_s=30)
+                self.store.fail_attempt(tid, reason, backoff_s=self._backoff_s())
             except Exception:  # noqa: BLE001
                 pass
         return {"ok": False, "status": status, "error": reason,
                 "result": reason}
+
+    def _backoff_s(self) -> float:
+        sc = getattr(self.cfg, "scheduler", None) if self.cfg else None
+        return float(getattr(sc, "retry_backoff_s", 30) or 30)
 
     def _role_caps(self, role: str) -> list[str]:
         if self.cfg:

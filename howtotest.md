@@ -23,6 +23,16 @@ invalid-tool-argument rejection). No key, no network, no model required.
 ### 1b. Runtime failure-mode checks (spot-check the wiring)
 
 ```bash
+# In-process executor (live execution without external workers). With a
+# healthy provider configured it starts with the server; control it via HTTP:
+curl -s -X POST localhost:8087/api/executor -d '{"action":"status"}'
+curl -s -X POST localhost:8087/api/executor -d '{"action":"start"}'   # or stop
+curl -s localhost:8087/api/scheduler   # shows executor: {running, inflight, stats}
+
+# End-to-end execution tests (goal -> dispatch -> failover -> real file ->
+# QA -> completion; retry/exhaustion; dependency ordering; parallelism):
+python3 -m unittest tests.test_e2e_executor -v
+
 # The canonical scheduler runs inside the HUD server; ask it for state:
 python3 orchestrator/server.py &            # start HUD
 sleep 1

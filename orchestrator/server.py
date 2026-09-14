@@ -576,12 +576,14 @@ def queue_goal(goal, files_hint=None):
     log(f"queue_goal -> added {len(added)}: " +
         ", ".join(f"#{a['id']}" for a in added))
     # Durable workflow: the task rows ARE the state; the canonical scheduler
-    # (started with the server) owns recovery. Keep the legacy adaptive pool
-    # for local-model execution.
+    # (started with the server) owns recovery, and the in-process executor
+    # (when a provider is healthy) runs tasks without external workers. The
+    # legacy adaptive pool remains as a compatibility execution path.
     try:
         start_scheduler_thread()
+        ensure_executor()
     except Exception as e:  # noqa: BLE001
-        log(f"scheduler start failed (non-fatal): {e}")
+        log(f"scheduler/executor start failed (non-fatal): {e}")
     pool_msg = start_pool(cap=2).get("msg") if model_ok() else None
     return added, "", pool_msg
 
@@ -617,6 +619,7 @@ def divide_goal(goal, files_hint=None):
 SCHEDULER = None
 _SCHEDULER_T = None
 _SCHED_STOP = None
+EXECUTOR = None
 
 
 def ensure_scheduler():
@@ -648,6 +651,7 @@ def scheduler_maintenance_now():
 def _scheduler_loop():
     """Managed maintenance loop with restart-on-crash (server-owned lifetime)."""
     backoff = 1.0
+    executor_probe_clock = 0
     while not (_SCHED_STOP and _SCHED_STOP.is_set()):
         try:
             SCHEDULER.maintenance()
@@ -657,6 +661,16 @@ def _scheduler_loop():
             EVENTS.emit("scheduler", status="error", error=str(e)[:300])
             _SCHED_STOP.wait(backoff)
             backoff = min(backoff * 2, 30)
+        # Re-probe for executor start ~every 12 cycles (~1 min): a provider
+        # (e.g. local llama-server) may come online after the HUD server did.
+        executor_probe_clock += 1
+        if executor_probe_clock >= 12:
+            executor_probe_clock = 0
+            if not (EXECUTOR and EXECUTOR.running):
+                try:
+                    ensure_executor()
+                except Exception:  # noqa: BLE001
+                    pass
         _SCHED_STOP.wait(5)
 
 
@@ -674,9 +688,48 @@ def start_scheduler_thread():
 
 def stop_scheduler():
     """Stop the scheduler cleanly (used by tests and shutdown)."""
+    global EXECUTOR
+    if EXECUTOR is not None:
+        EXECUTOR.stop()
     if SCHEDULER is not None:
         SCHEDULER.stop()
         EVENTS.emit("scheduler", status="stopped")
+
+
+## ----------------------------- executor -----------------------------
+# Live in-process execution: the scheduler claims (atomic reservation) and the
+# TaskExecutor runs the AgentPipeline HERE — logical agents as pipeline stages,
+# provider failover, real Workspace writes + QA + review. The adaptive.sh
+# worker pool stays as a compatibility execution path; both compete for tasks
+# through the same atomic claim, so no task is ever double-executed.
+def _providers_healthy() -> bool:
+    try:
+        return any(p.check_health() == "healthy" for p in PROVIDERS.list())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def ensure_executor() -> bool:
+    """Start the in-process executor (idempotent, health-gated).
+
+    Returns True when running. Disabled with ELYSIA_EXECUTOR=0, or when no
+    provider answers a health probe (the worker-pool path remains available).
+    """
+    global EXECUTOR
+    if EXECUTOR is not None and EXECUTOR.running:
+        return True
+    if os.environ.get("ELYSIA_EXECUTOR", "1") == "0":
+        return False
+    s = ensure_scheduler()
+    if not _providers_healthy():
+        EVENTS.emit("executor", status="skip",
+                    detail="no healthy provider; worker-pool path only")
+        return False
+    from elysia.core.executor import TaskExecutor
+    EXECUTOR = TaskExecutor(s, WS_DIR, max_tasks=2)
+    EXECUTOR.start()
+    log("task executor started (in-process AgentPipeline execution)")
+    return True
 
 
 ## ----------------------------- pool -----------------------------
@@ -754,6 +807,7 @@ class Handler(BaseHTTPRequestHandler):
             s = SCHEDULER
             counts = taskboard.store().counts()
             blocked = len(taskboard.store().blocked_tasks())
+            ex = EXECUTOR
             return self._send(200, {
                 "ok": True,
                 "running": bool(s),
@@ -762,6 +816,9 @@ class Handler(BaseHTTPRequestHandler):
                 "budget": s.current_budget() if s else None,
                 "counts": counts,
                 "blocked": blocked,
+                "executor": {"running": bool(ex and ex.running),
+                             "inflight": ex.inflight() if ex else [],
+                             "stats": ex.stats if ex else None},
             })
         if path == "/api/agent-log":
             wid = (q.get("worker") or [""])[0]
@@ -792,6 +849,22 @@ class Handler(BaseHTTPRequestHandler):
             affected = (SCHEDULER.cancel(tid, by="user")
                         if SCHEDULER else taskboard.store().cancel(tid))
             return self._send(200, {"ok": True, "cancelled": affected})
+        if path == "/api/executor":
+            action = (body.get("action") or "status").strip()
+            if action == "start":
+                ok = ensure_executor()
+                return self._send(200, {"ok": ok, "running": ok,
+                                        "detail": "" if ok else
+                                        "no healthy provider (or disabled)"})
+            if action == "stop":
+                if EXECUTOR is not None:
+                    EXECUTOR.stop()
+                return self._send(200, {"ok": True, "running": False})
+            ex = EXECUTOR
+            return self._send(200, {"ok": True, "running": bool(ex and ex.running),
+                                    "inflight": ex.inflight() if ex else [],
+                                    "stats": ex.stats if ex else None,
+                                    "max_tasks": ex.max_tasks if ex else None})
         if path == "/api/chat":
             return self._api_chat(body)
         if path == "/api/agent":
@@ -984,12 +1057,14 @@ def main():
     args = ap.parse_args()
     taskboard.init_db()
     os.makedirs(LOGS_DIR, exist_ok=True)
-    # Canonical scheduler: lease expiry / timeouts / dep-failure recovery run
-    # for the server's whole lifetime (restart-safe: state is in SQLite).
+    # Canonical scheduler + in-process executor: lease expiry / timeouts /
+    # dep-failure recovery run for the server's whole lifetime (restart-safe:
+    # state is in SQLite); tasks execute in-process when a provider answers.
     try:
         start_scheduler_thread()
+        ensure_executor()
     except Exception as e:  # noqa: BLE001
-        log(f"scheduler failed to start (server continues): {e}")
+        log(f"scheduler/executor failed to start (server continues): {e}")
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     log(f"HUD listening on http://{args.host}:{args.port}  "
         f"(workspace={WS_DIR}, model={'UP' if model_ok() else 'DOWN'})")
