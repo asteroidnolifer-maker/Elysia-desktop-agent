@@ -4,6 +4,7 @@
   - machine capability digest (what tools actually exist — toolcatalog)
   - task-board state (counts, blocked, recent results — TaskStore)
   - provider health (which models answer — ProviderManager)
+  - control plane (which logical agent role runs on which provider)
   - optional focused knowledge digest for a topic (knowledge)
 
 Design: offline-first, stdlib-only, never raises. Missing data is reported as
@@ -36,7 +37,10 @@ def _provider_line(pm) -> str:
     healthy = [r for r in rows if r.get("status") == "healthy"]
     names = ", ".join(f"{r.get('name', '?')}({r.get('status', '?')})"
                       for r in rows[:5])
-    return (f"Providers: {len(healthy)}/{len(rows)} healthy — {names}")
+    # Never report "healthy" for a provider nobody has actually contacted.
+    note = (" (unverified — probe with `elysia master status`)"
+            if healthy and not any(r.get("probed") for r in healthy) else "")
+    return f"Providers: {len(healthy)}/{len(rows)} healthy{note} — {names}"
 
 
 def brief(topic: str = "", store=None, providers=None, workspace_root: str = "",
@@ -73,6 +77,33 @@ def brief(topic: str = "", store=None, providers=None, workspace_root: str = "",
             sections.append(("Providers", line))
         except Exception as e:  # noqa: BLE001
             sections.append(("Providers", f"unavailable: {e}"))
+            issues += 1
+
+    # 3b) control plane: logical agent roles -> provider that serves them
+    if providers is not None:
+        try:
+            from .master import role_assignments
+            rows = role_assignments(providers)
+            served = [r for r in rows if r["provider"]]
+            if served:
+                by_provider: dict[str, list[str]] = {}
+                for r in served:
+                    by_provider.setdefault(
+                        f"{r['provider']} ({r['model']})", []).append(r["role"])
+                body = "\n".join(
+                    f"  {target} <- {', '.join(roles)}"
+                    for target, roles in by_provider.items())
+                if len(served) != len(rows):
+                    body += (f"\n  unserved roles: "
+                             f"{', '.join(r['role'] for r in rows if not r['provider'])}")
+                sections.append(("Control plane", body))
+            else:
+                sections.append(("Control plane",
+                                 "no provider matches any logical role — "
+                                 "`elysia providers --catalog`"))
+                issues += 1
+        except Exception as e:  # noqa: BLE001
+            sections.append(("Control plane", f"unavailable: {e}"))
             issues += 1
 
     # 4) focused knowledge (optional)

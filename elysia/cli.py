@@ -40,6 +40,8 @@ Usage:
     elysia audit
     elysia test [--unit|--chaos|--e2e]
     elysia logs [n]
+    elysia master run "<goal>" [--no-wait] [--timeout S] [--json]
+    elysia master status | agents
 """
 from __future__ import annotations
 
@@ -489,6 +491,82 @@ def cmd_agents(args):
     return 0
 
 
+# -- master control plane ------------------------------------------------------
+def _master_controller():
+    from elysia.core.master import MasterController
+    from elysia.core.providers import ProviderManager
+    from elysia.core.resources import ResourceManager
+    from elysia.core.tasks import TaskStore
+    cfg = load_config()
+    pm = ProviderManager()
+    if cfg.providers:
+        pm.register_many(cfg.providers)
+    store = TaskStore(os.path.join(_root(), "orchestrator", "taskboard.sqlite"))
+    return MasterController(store, pm, cfg.workspace.root, cfg=cfg,
+                            resources=ResourceManager(), max_tasks=2)
+
+
+def cmd_master(args):
+    mc = _master_controller()
+    if args.action == "agents":
+        rows = mc.agents()
+        if args.json:
+            print(json.dumps(rows, indent=1))
+            return 0
+        print(f"{'role':<20} {'capabilities':<28} provider / model")
+        for r in rows:
+            target = (f"{r['provider']} ({r['model']})" if r["provider"]
+                      else "-- no provider matches --")
+            print(f"{r['role']:<20} {','.join(r['capabilities']):<28} {target}")
+        return 0
+    if args.action == "status":
+        # interactive: probe providers so "healthy" is never assumed
+        st = mc.status(probe=True)
+        if args.json:
+            print(json.dumps(st, indent=1, default=str))
+            return 0
+        print(f"master worker : {st['worker']} (max_tasks={st['max_tasks']}, "
+              f"budget={st['budget']}, running={st['running']})")
+        print(f"inflight      : {st['inflight'] or '-'}")
+        print("counts        :", json.dumps(st["counts"]))
+        print("executor      :", json.dumps(st["executor_stats"]))
+        print("stages seen   :", ", ".join(st["stages_seen"]) or "-")
+        print("providers     :")
+        for p in st["providers"]:
+            print(f"  {p['name']:<14} {p['status']:<12} "
+                  f"{p['current_concurrency']}/{p['max_concurrency']} slots, "
+                  f"{p['requests']} req, {p['failures']} fail")
+        return 0
+    goal = (args.goal or "").strip()
+    if len(goal) < 3:
+        print("usage: elysia master run \"<goal>\" [--no-wait] [--timeout S]")
+        return 1
+    run = mc.run(goal, timeout_s=args.timeout, start=not args.no_wait)
+    if args.json:
+        print(json.dumps(run, indent=1, default=str))
+        return 0 if run.get("ok") else 1
+    if not run.get("ok"):
+        print(f"master: {run.get('status')} — {run.get('error')}")
+        return 1
+    rep = run.get("report") or {}
+    print(f"goal #{run['goal_task']}: {goal[:120]}")
+    print(f"sub-tasks: {len(run['subtasks'])} persisted on the board")
+    for t in rep.get("tasks") or []:
+        files = ", ".join(t["files_written"]) or "-"
+        print(f"  #{t['id']} [{t['status']}] {t['agent_role'] or 'agent'}: "
+              f"{t['title'][:60]} -> {files}")
+        if t.get("error"):
+            print(f"      error: {t['error'][:160]}")
+    print("logical agents :", " -> ".join(rep.get("stages") or []) or "-")
+    print("files changed  :", ", ".join(rep.get("files_changed") or []) or "-")
+    for p in rep.get("providers") or []:
+        print(f"provider {p['name']}: {p['status']}, {p['requests']} req, "
+              f"{p['failures']} fail")
+    print(f"outcome: {rep.get('completed', 0)}/{len(rep.get('tasks') or [])} "
+          f"completed")
+    return 0 if rep.get("ok") else 1
+
+
 # -- research -------------------------------------------------------------------
 def cmd_research(args):
     cfg = load_config()
@@ -772,6 +850,17 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("role", nargs="?", default=None)
     ag.add_argument("--prompt", default=None)
 
+    mc = sub.add_parser("master", help="master control plane: drive a goal "
+                                       "through the agent pipeline")
+    mc.add_argument("action", choices=["run", "status", "agents"])
+    mc.add_argument("goal", nargs="?", default=None)
+    mc.add_argument("--timeout", type=float, default=180.0,
+                    help="seconds to drive the workflow before reporting")
+    mc.add_argument("--no-wait", action="store_true",
+                    help="persist + start, return immediately")
+    mc.add_argument("--json", action="store_true",
+                    help="emit the full machine-readable run record")
+
     rs = sub.add_parser("research")
     rs.add_argument("query")
     rs.add_argument("--format", default="")
@@ -834,6 +923,7 @@ def main(argv=None) -> int:
         "prompt": cmd_prompt, "tools": cmd_tools, "brief": cmd_brief,
         "jarvis": cmd_jarvis,
         "cost": cmd_cost, "resources": cmd_resources, "agents": cmd_agents,
+        "master": cmd_master,
         "research": cmd_research, "orx": cmd_orx, "template": cmd_template,
         "checkpoint": cmd_checkpoint, "checkpoints": cmd_checkpoints,
         "rollback": cmd_rollback, "since-checkpoint": cmd_since,

@@ -44,6 +44,12 @@ ALL_CAPABILITIES = {CHAT, CODING, REASONING, TOOL_CALLING, VISION,
                     LONG_CONTEXT, STRUCTURED_OUTPUT, STREAMING, BACKGROUND,
                     FILE_ACCESS}
 
+# Capabilities that improve quality but are not required to serve a role.
+# A provider missing only these may still be used as a FALLBACK, so a plain
+# local coder model can plan/review when nothing better is configured — while a
+# strictly matching provider is always preferred.
+SOFT_CAPABILITIES = {REASONING, LONG_CONTEXT, VISION}
+
 
 class ProviderError(Exception):
     pass
@@ -62,6 +68,9 @@ class Provider:
     def __init__(self, cfg: ProviderConfig):
         self.cfg = cfg
         self.status = self.HEALTHY
+        # A freshly registered provider has never been contacted: "healthy" is
+        # the optimistic default, not evidence. Reports must say so.
+        self.probed = False
         self.last_error = ""
         self.in_flight = 0
         self._mu = threading.Lock()
@@ -100,6 +109,7 @@ class Provider:
 
     # -- health ------------------------------------------------------------
     def check_health(self) -> str:
+        self.probed = True
         try:
             base = self.cfg.base_url.rstrip("/")
             with urllib.request.urlopen(base + "/models", timeout=5) as r:
@@ -224,6 +234,7 @@ class Provider:
             "model": self.cfg.model,
             "capabilities": self.cfg.capabilities or [],
             "status": self.status,
+            "probed": self.probed,
             "last_error": self.last_error,
             "max_concurrency": self.cfg.concurrency,
             "current_concurrency": self.in_flight,
@@ -328,6 +339,14 @@ class ProviderManager:
         order = {k: i for i, k in enumerate(self._ordering)}
         return sorted(ps, key=lambda p: order.get((p.cfg.kind, p.cfg.label), 999))
 
+    @staticmethod
+    def _requirement_passes(caps: set) -> list[set]:
+        """Strict capability set first, then the relaxed (soft-optional) one."""
+        if not caps:
+            return [set()]
+        relaxed = {c for c in caps if c not in SOFT_CAPABILITIES}
+        return [caps] if relaxed == caps else [caps, relaxed]
+
     def select(self, capabilities=None, avoid_models=None) -> Provider | None:
         """Pick a healthy provider matching capabilities with a free slot.
 
@@ -339,16 +358,17 @@ class ProviderManager:
         """
         caps = set(capabilities or [])
         avoid = set(avoid_models or [])
-        for p in self._ordered():
-            if p.status != Provider.HEALTHY:
-                continue
-            if p.cfg.model in avoid:
-                continue
-            if caps and not p.has_all(caps):
-                continue
-            if p.acquire():
-                p.release()  # probe; actual reservation via reserve()
-                return p
+        for required in self._requirement_passes(caps):
+            for p in self._ordered():
+                if p.status != Provider.HEALTHY:
+                    continue
+                if p.cfg.model in avoid:
+                    continue
+                if required and not p.has_all(required):
+                    continue
+                if p.acquire():
+                    p.release()  # probe; actual reservation via reserve()
+                    return p
         return None
 
     def reserve(self, capabilities=None, avoid_models=None,
@@ -373,15 +393,16 @@ class ProviderManager:
                 candidates = list(candidates)
         # always honor the exclude set (fallback chain never re-tries)
         candidates = [x for x in candidates if x.name not in skip]
-        for p in candidates:
-            if p.status == Provider.UNAVAILABLE and not preferred:
-                continue
-            if p.cfg.model in avoid:
-                continue
-            if caps and not p.has_all(caps):
-                continue
-            if p.acquire():  # slot held until release()
-                return ProviderReservation(self, p)
+        for required in self._requirement_passes(caps):
+            for p in candidates:
+                if p.status == Provider.UNAVAILABLE and not preferred:
+                    continue
+                if p.cfg.model in avoid:
+                    continue
+                if required and not p.has_all(required):
+                    continue
+                if p.acquire():  # slot held until release()
+                    return ProviderReservation(self, p)
         return None
 
     def execute(self, messages, capabilities=None, max_tokens=None,
@@ -423,7 +444,20 @@ class ProviderManager:
         summary = "; ".join(errors) if errors else "no provider available"
         return None, summary
 
-    def health_report(self) -> list[dict]:
+    def health_report(self, probe: bool = False) -> list[dict]:
+        """Capacity rows for every provider.
+
+        ``probe=True`` actively calls each provider first so the report never
+        claims "healthy" for a backend nobody has contacted (the cached status
+        of a freshly registered provider starts at healthy).
+        """
+        if probe:
+            for p in self.list():
+                try:
+                    p.check_health()
+                except Exception as e:  # noqa: BLE001 — a probe must not crash
+                    p.status = Provider.UNAVAILABLE
+                    p.last_error = str(e)[:200]
         return [p.capacity() for p in self.list()]
 
     def usage_totals(self) -> dict:

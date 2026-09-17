@@ -150,7 +150,7 @@ class AgentPipeline:
         if err:
             return self._stage_fail(tid, "running", f"implementer: {err}")
 
-        from orchestrator.brain import parse_file_blocks
+        from .fileblocks import parse_file_blocks
         files = parse_file_blocks(text, owned)
         written, qa_failures = [], []
         for path, content in files.items():
@@ -162,18 +162,28 @@ class AgentPipeline:
                 qa_failures.append(f"{path}: not in owned files")
                 continue
             try:
+                prior = ws.read(path) if ws.exists(path) else None
                 ws.write_owned(path, content)
-                written.append(path)
                 ok, reason = validate_file(path, content)
-                if not ok:
+                if ok:
+                    written.append(path)
+                else:
+                    # NEVER leave code that failed validation in the workspace:
+                    # restore the previous content (or remove a new file).
                     qa_failures.append(f"{path}: {reason}")
+                    self._rollback_file(ws, path, prior)
             except Exception as e:  # noqa: BLE001
                 qa_failures.append(f"{path}: {e}")
 
         # tester: run project tests if requested and a runner exists
         test_result = ""
         if run_tests and written:
+            self.events.emit("agent.run", agent_id="tester", task_id=tid,
+                             status="started", detail="running project tests")
             test_result = self._run_tests(ws)
+            self.events.emit("agent.run", agent_id="tester", task_id=tid,
+                             status="ok" if test_result else "skipped",
+                             detail=test_result[:200] or "no test runner found")
         # code reviewer inspects the real git diff
         review = ""
         diff_text = ""
@@ -198,6 +208,18 @@ class AgentPipeline:
             self.store.complete(tid, "reviewing", "\n".join(lines))
         return {"ok": True, "status": "reviewing", "result": "\n".join(lines),
                 "tests": test_result, "review": review}
+
+    @staticmethod
+    def _rollback_file(ws, path: str, prior: str | None) -> None:
+        """Undo a write whose content failed QA (best effort, never raises)."""
+        import os
+        try:
+            if prior is None:
+                os.remove(ws.resolve(path))
+            else:
+                ws.write_owned(path, prior)
+        except Exception:  # noqa: BLE001 — a failed cleanup must not mask the QA failure
+            pass
 
     def _run_tests(self, ws, timeout=120) -> str:
         """Best-effort test runner via the QA harness (no unsafe shell)."""
@@ -269,7 +291,7 @@ class AgentPipeline:
                        "risks. Return markdown sections: '## Modules', "
                        "'## Risks'.",
         }, {"role": "user", "content": plan or "No plan supplied"}]
-        self.events.emit("agent.run", agent_id="architect",
+        self.events.emit("agent.run", agent_id="architect", task_id=task_id,
                          status="started")
         text, err = self._execute(messages, self._role_caps("architect"),
                                   task_id=task_id)
@@ -302,7 +324,7 @@ class AgentPipeline:
                        "commands and what a green result looks like for this "
                        "task.",
         }, {"role": "user", "content": spec}]
-        self.events.emit("agent.run", agent_id="tester",
+        self.events.emit("agent.run", agent_id="tester", task_id=task_id,
                          status="started")
         text, err = self._execute(messages, self._role_caps("tester"),
                                   task_id=task_id)
@@ -320,7 +342,7 @@ class AgentPipeline:
                        "BLOCKER/MAJOR/MINOR/NIT.",
         }, {"role": "user", "content": diff or "No diff provided"}]
         self.events.emit("agent.run", agent_id="code_reviewer",
-                         status="started")
+                         task_id=task_id, status="started")
         text, err = self._execute(messages, self._role_caps("code_reviewer"),
                                   task_id=task_id)
         if err:
@@ -335,7 +357,7 @@ class AgentPipeline:
                        "accurate docs for the given change.",
         }, {"role": "user", "content": spec}]
         self.events.emit("agent.run", agent_id="documentation_agent",
-                         status="started")
+                         task_id=task_id, status="started")
         text, err = self._execute(messages, self._role_caps("documentation_agent"),
                                   task_id=task_id)
         if err:

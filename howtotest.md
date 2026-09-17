@@ -12,13 +12,40 @@ cd Elysia-desktop-agent          # repo root
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all tests pass** — the original 88 plus the new
+Expected: **all 194 tests pass** — the original 88 plus the new
 `tests/test_providers_plus.py` bundle (provider presets, config integration,
-prompt styles, browser login store, knowledge base, HuggingFace catalog) and
+prompt styles, browser login store, knowledge base, HuggingFace catalog),
 the `tests/test_runtime_wiring.py` bundle (scheduler-in-server crash recovery,
 worker lease heartbeat, provider failover on timeout/429/unavailable/crash,
 concurrency=1 isolation, resource-queue budget gate, symlink-escape and
-invalid-tool-argument rejection). No key, no network, no model required.
+invalid-tool-argument rejection), and the `tests/test_master_control.py`
+bundle (see §1c). No key, no network, no model required.
+
+### 1c. Master control plane (goal -> agents -> files -> review)
+
+`tests/test_master_control.py` drives the REAL runtime with a scripted model
+transport: TaskStore, Scheduler, TaskExecutor, AgentPipeline, Workspace, QA and
+the git-diff reviewer are all the shipped code. It proves the master control
+plane end to end: the planner produced the durable task graph, the implementer
+wrote real files, QA compiled them, the tester and code reviewer ran (the
+reviewer sees a real `git diff`), provider A failing hands the task to B,
+independent sub-tasks overlap, a dependent sub-task waits for its prerequisite,
+a fresh controller over the same SQLite board recovers and finishes the work,
+cancellation is honest, and a QA failure rolls the bad file back instead of
+leaving invalid code in the workspace.
+
+```bash
+python3 -m unittest tests.test_master_control -v
+```
+
+Live inspection of the same machinery:
+
+```bash
+./bin/elysia master agents     # which provider serves each logical role
+./bin/elysia master status     # board, inflight, stages seen, provider health
+./bin/elysia master run "add a subtract() helper to calc.py"
+# -> per-task status, files changed, agent order, provider req/fail counts
+```
 
 ### 1b. Runtime failure-mode checks (spot-check the wiring)
 
@@ -76,6 +103,8 @@ kill %1
 ./bin/elysia jarvis "what's running?"    # natural-language front door
 ./bin/elysia jarvis "how do I scan my own server"   # -> knowledge route
 ./bin/elysia jarvis --deep "latest llama.cpp features"  # -> deep research
+./bin/elysia jarvis "add retry to the exporter"         # -> master control plane
+./bin/elysia master agents | status | run "<goal>"
 ```
 
 All of these must exit 0 with no traceback even with zero credentials and no
@@ -159,6 +188,11 @@ correct graceful degradation, not a failure.
 ./bin/elysia skills list
 # → curated vendor + native skills; offensive names stay quarantined/absent
 ```
+
+The briefing also prints the **Control plane** section: which provider/model
+serves each logical agent role, and which roles are unserved (no provider
+matches their capabilities). Providers are labelled *unverified* until
+something actually contacts them (`elysia master status` probes).
 
 Agent-context wiring (unit-covered): a task mentioning "nmap"/"pentest" gets
 the defensive digest in its prompt; a normal coding task does not. See

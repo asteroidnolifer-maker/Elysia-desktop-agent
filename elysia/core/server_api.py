@@ -1,14 +1,14 @@
 """Safe HTTP-facing adapters for the Elysia core.
 
 These are the ONLY entry points the web server should call. They keep each
-HTTP request bounded (timeouts, size caps), resolve to the new multi-agent
-engine, and always return JSON-serializable results with graceful failure —
-never raise, never execute provider calls on the caller's thread for > cap.
+HTTP request bounded (timeouts, size caps), drive the master control plane
+(``elysia.core.master``), and always return JSON-serializable results with
+graceful failure — never raise, never execute provider calls on the caller's
+thread for longer than the cap.
 """
 from __future__ import annotations
 
 import os
-import re
 import sys
 import threading
 
@@ -17,10 +17,12 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from elysia.core.agents import AgentPipeline  # noqa: E402
 from elysia.core.config import load_config  # noqa: E402
+from elysia.core.master import (  # noqa: E402
+    MasterController, extract_owned_files, persist_goal)
 from elysia.core.memory import Memory  # noqa: E402
 from elysia.core.providers import ProviderManager  # noqa: E402
+from elysia.core.resources import ResourceManager  # noqa: E402
 from elysia.core.tasks import TaskStore  # noqa: E402
 
 MAX_GOAL_CHARS = 2000
@@ -31,54 +33,90 @@ def _store_path() -> str:
     return os.path.join(REPO_ROOT, "orchestrator", "taskboard.sqlite")
 
 
-def _pipeline() -> AgentPipeline:
+# -- master control plane ------------------------------------------------------
+# The controller is memoized: one scheduler + executor per process, so
+# concurrency caps, provider slots and lease accounting are global rather than
+# per request. It is rebuilt only when the configured provider set changes.
+_MASTER: MasterController | None = None
+_MASTER_SIG = None
+
+
+def _provider_sig(cfg) -> tuple:
+    return tuple((p.kind, p.label, p.model, p.base_url, p.concurrency)
+                 for p in (cfg.providers or []))
+
+
+def master() -> MasterController:
+    """The process-wide master controller (goal -> agents -> completion)."""
+    global _MASTER, _MASTER_SIG
     cfg = load_config()
-    pm = ProviderManager()
-    pm.register_many(cfg.providers)
-    store = TaskStore(_store_path())
-    return AgentPipeline(pm, store, cfg=cfg,
-                         memory=Memory(cfg.memory.dir))
-
-
-_FILE_RE = re.compile(
-    r"[\w./-]+\.(?:py|md|rs|go|js|ts|tsx|jsx|sh|yaml|yml|json|toml|sql|css|html)",
-    re.I)
+    sig = (_provider_sig(cfg), cfg.workspace.root)
+    if _MASTER is None or sig != _MASTER_SIG:
+        if _MASTER is not None:
+            try:
+                _MASTER.stop(release=False)
+            except Exception:  # noqa: BLE001
+                pass
+        pm = ProviderManager()
+        if cfg.providers:
+            pm.register_many(cfg.providers)
+        _MASTER = MasterController(TaskStore(_store_path()), pm,
+                                   cfg.workspace.root, cfg=cfg,
+                                   resources=ResourceManager(), max_tasks=2)
+        _MASTER_SIG = sig
+    return _MASTER
 
 
 def _extract_files(text: str | None) -> list[str]:
     """Heuristic owned-file hints from a planner subtask (never traversal)."""
-    out = [p for p in (_FILE_RE.findall(text or ""))
-           if ".." not in p and not p.startswith("/")]
-    return list(dict.fromkeys(out))[:8]
+    return extract_owned_files(text)
 
 
-def _persist_goal(goal: str, subs: list[dict], store: TaskStore | None = None) -> list[dict]:
-    """Persist a goal durably on the board.
+def _persist_goal(goal: str, subs: list[dict],
+                  store: TaskStore | None = None) -> list[dict]:
+    """Persist a goal durably on the board (compatibility wrapper).
 
     Goal becomes a done milestone; each planned subtask is a ready board task
     depending on it. Because everything lives in SQLite, a crash before the
     scheduler runs them is survivable: after restart the ready subtasks are
     picked up by the scheduler exactly like any other board work.
     """
-    store = store or TaskStore(_store_path())
-    gid = store.add_task(title=goal[:120] or "goal", description=goal,
-                         kind="goal", priority=0, status="done")
-    subs_out = []
-    for i, s in enumerate(subs):
-        detail = s.get("detail") or s.get("title") or ""
-        files = _extract_files(detail)
-        tid = store.add_task(title=(s.get("title") or goal)[:120],
-                             description=detail, kind="subtask",
-                             owned_files=files, dependencies=[gid],
-                             priority=3 + i)
-        store.mark_ready(tid)
-        subs_out.append({"id": tid, "files": files, "title":
-                         (s.get("title") or goal)[:120]})
-    return subs_out
+    return persist_goal(goal, subs or [], store or TaskStore(_store_path()))
+
+
+def _master_reply(run: dict) -> str:
+    """Human-readable trace of what the master actually controlled."""
+    rep = run.get("report") or {}
+    tasks = rep.get("tasks") or []
+    lines = [f"Goal: {(run.get('goal') or '')[:160]}",
+             f"Plan: {len(run.get('subtasks') or [])} sub-task(s) "
+             f"persisted on the board"]
+    for t in tasks[:12]:
+        files = ", ".join(t.get("files_written") or []) or "-"
+        lines.append(f"  #{t['id']} [{t['status']}] "
+                     f"{t.get('agent_role') or 'agent'}: "
+                     f"{(t.get('title') or '')[:70]} -> {files}")
+        if t.get("error"):
+            lines.append(f"      error: {str(t['error'])[:160]}")
+    if rep.get("stages"):
+        lines.append("Logical agents: " + " -> ".join(rep["stages"]))
+    if rep.get("files_changed"):
+        lines.append("Files changed: " + ", ".join(rep["files_changed"][:8]))
+    provs = rep.get("providers") or []
+    if provs:
+        lines.append("Providers: " + ", ".join(
+            f"{p.get('name')}({p.get('status')}, {p.get('requests')} req, "
+            f"{p.get('failures')} fail)" for p in provs[:5]))
+    state = ("completed" if rep.get("ok") else
+             "still running" if (run.get("wait") or {}).get("timeout") else
+             "not all tasks completed")
+    lines.append(f"Outcome: {rep.get('completed', 0)}/{len(tasks)} completed "
+                 f"({state})")
+    return "\n".join(lines)
 
 
 def run_agent(task: str, timeout_s: float = _MAX_WAIT_S) -> dict:
-    """Run a goal through the pipeline on a bounded thread.
+    """Run a goal through the master control plane on a bounded thread.
 
     Returns a dict always (never raises):
         {"ok": bool, "status": "done"|"running"|"queued"|"error",
@@ -97,36 +135,33 @@ def run_agent(task: str, timeout_s: float = _MAX_WAIT_S) -> dict:
 
     def _run():
         try:
-            pipe = _pipeline()
-            holder[0] = pipe.plan_task(task)
+            holder[0] = master().run(task, timeout_s=timeout_s)
         except Exception as e:  # noqa: BLE001
-            errors[0] = str(e)
+            errors[0] = f"{type(e).__name__}: {e}"
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     t.join(timeout=timeout_s)
     if t.is_alive():
         # Bounded wait exceeded; never let HTTP hang on a downstream provider.
+        # The worker thread keeps driving the workflow in this process, and the
+        # task rows stay durable so the server's own executor takes over.
         return {"ok": True, "status": "running",
-                "reply": "Agent started on your request; check the task board "
-                         "for progress."}
+                "reply": "Master started the workflow; it is still running — "
+                         "check the task board / HUD for the live trace."}
     if errors[0]:
         return _enqueue_or_error(task, errors[0])
-    res = holder[0] or {}
-    if not res.get("ok"):
-        return _enqueue_or_error(task, res.get("error") or "planning failed")
-    tasks = res.get("tasks") or []
-    # Durable: write the plan to the board now, so a crash after this point
-    # still lets the scheduler pick the sub-tasks up after restart.
-    try:
-        subs = _persist_goal(task, tasks)
-    except Exception as e:  # noqa: BLE001
-        subs = []
-    lines = [f"Planned {len(tasks)} sub-tasks; queued {len(subs)} on the board:"] + [
-        f"  - {s['title']}" for s in subs[:10]]
-    return {"ok": True, "status": "done" if subs else "planned",
-            "reply": "\n".join(lines),
-            "detail": {"tasks": subs or tasks}}
+    run = holder[0] or {}
+    if not run.get("ok"):
+        return _enqueue_or_error(task, run.get("error") or "planning failed")
+    return {"ok": True, "status": run.get("status", "done"),
+            "reply": _master_reply(run), "detail": run,
+            "report": run.get("report")}
+
+
+def run_goal(task: str, timeout_s: float = _MAX_WAIT_S) -> dict:
+    """Explicit goal entry point (same master path as ``run_agent``)."""
+    return run_agent(task, timeout_s=timeout_s)
 
 
 def _enqueue_or_error(task: str, reason: str) -> dict:

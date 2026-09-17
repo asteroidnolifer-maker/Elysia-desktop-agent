@@ -9,7 +9,7 @@ Run these in order; the whole envelope must stay green.
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all tests pass** (currently 181), including the
+Expected: **all tests pass** (currently 194), including the
 `tests/test_features.py` bundle covering context budgeting, telemetry/cost,
 tool risk gating, computer permissions + shell gating, skills risk assessment
 (intent-based, false-positive free), templates expansion, research engine
@@ -25,7 +25,13 @@ CLI agents, credential-gated activation), config preset integration
 (`ELYSIA_DISABLE_PRESETS`), prompt styles (worker contract preserved),
 browser-login credential store (0600, env-wins, no secrets in output),
 knowledge base (search, defensive context digest), and the HuggingFace
-catalog/recommend/inference provider.
+catalog/recommend/inference provider — plus `tests/test_master_control.py`:
+the master control plane (`elysia.core.master.MasterController`) end to end —
+planner -> durable task graph -> scheduler -> executor -> multiple logical
+agents -> real file writes -> QA -> tester -> git-diff reviewer -> completion,
+with provider failover, parallel independent work, dependency sequencing,
+restart recovery, cancellation, QA rejection rollback, and the agent/provider
+trace the master reports.
 
 ## 2. Compile check
 
@@ -72,7 +78,30 @@ re-imports the PICK list from `agent-skills-collection`.
 Expected: report to `workspace/reports/<topic>.md` (+ `.deep.md` in deep mode),
 structured `[sources] N` printed. Offline (no provider) degrades gracefully.
 
-## 6. Server endpoints against the new core
+## 6. Master control plane
+
+The master owns the whole graph: goal -> planner -> durable task graph ->
+scheduler -> executor -> logical agents -> workspace -> QA -> review ->
+completion, and reports what actually ran.
+
+```bash
+./bin/elysia master agents            # role -> required capabilities -> provider
+./bin/elysia master status            # board counts, inflight, stages, providers
+./bin/elysia master run "add a subtract() helper to calc.py"
+./bin/elysia master run "<goal>" --no-wait --json     # fire-and-forget
+python3 -m unittest tests.test_master_control -v
+```
+
+Expected: `master agents` serves planner/implementer/tester/code_reviewer on
+the configured provider (a strict capability match wins; a local
+`chat,coding` model is used as a documented fallback for `chat,reasoning`
+roles), `master status` probes providers so "healthy" is never assumed, and a
+completed `master run` prints the per-task status, the logical-agent order
+(`planner -> implementer -> tester -> code_reviewer`), the files changed, and
+provider request/failure counts. Offline (no reachable provider) it exits
+non-zero with a clear provider error instead of pretending to work.
+
+## 7. Server endpoints against the new core
 
 `orchestrator/server.py` `/api/agent`, `/api/chat` (research/elysia intents)
 now call `elysia.core.server_api` (bounded threads, structured results,
