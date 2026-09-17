@@ -12,14 +12,15 @@ cd Elysia-desktop-agent          # repo root
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all 194 tests pass** — the original 88 plus the new
+Expected: **all 210 tests pass** — the original 88 plus the new
 `tests/test_providers_plus.py` bundle (provider presets, config integration,
 prompt styles, browser login store, knowledge base, HuggingFace catalog),
 the `tests/test_runtime_wiring.py` bundle (scheduler-in-server crash recovery,
 worker lease heartbeat, provider failover on timeout/429/unavailable/crash,
 concurrency=1 isolation, resource-queue budget gate, symlink-escape and
 invalid-tool-argument rejection), and the `tests/test_master_control.py`
-bundle (see §1c). No key, no network, no model required.
+bundle (see §1c) and the `tests/test_boot_scripts.py` bundle (install/launch
+script contract; see §7b). No key, no network, no model required.
 
 ### 1c. Master control plane (goal -> agents -> files -> review)
 
@@ -215,6 +216,56 @@ Model/dataset downloads stay manual (`hf.co/<repo>` links are printed by
 `elysia hf models`); nothing auto-fetches weights.
 
 ---
+
+## 7b. Universal install + launch scripts (offline-safe)
+
+`scripts/elysia_boot.py` is the one implementation for Linux, macOS and
+Windows; `install.sh`/`start.sh`, `install.ps1`/`start.ps1` and the `.cmd`
+wrappers only locate a Python interpreter. Everything below needs no network,
+no model and no credentials.
+
+```bash
+# syntax / wiring
+sh -n install.sh && bash -n start.sh
+python3 -m py_compile scripts/elysia_boot.py
+python3 scripts/elysia_boot.py --help
+./install.sh --help
+
+# a full dry run: prints every action, changes nothing
+./install.sh --dry-run
+./install.sh --dry-run --deps        # shows the exact package-manager command
+./start.sh --dry-run                 # shows the exact service commands
+
+# real (read-only) state
+./start.sh status                    # ports/pids/binaries; add --json for machines
+./start.sh doctor
+./start.sh stop                      # safe no-op when nothing is running
+```
+
+Expected: `--dry-run` performs no writes and prints "dry run: nothing was
+changed"; `status` reports `down` for every port when nothing is running (it
+never claims a service is up without the port answering); `stop` with no pid
+files prints `stopped: nothing` and exits 0; with no Go toolchain the build
+step reports SKIP plus the exact `go build` command instead of a fake success.
+
+Lifecycle check (spawns a harmless sleeper, verifies stop really kills it):
+
+```bash
+python3 - <<'EOF'
+import sys, argparse
+sys.path.insert(0, "scripts")
+import elysia_boot as eb
+ui, args = eb.Ui(), argparse.Namespace(dry_run=False, json=False, yes=True)
+assert eb._spawn(ui, "hud", [sys.executable, "-c", "import time; time.sleep(60)"],
+                 eb.ROOT, None)
+pid = eb._read_pid("hud")
+assert pid and eb._alive(pid)
+eb.cmd_stop(ui, args)
+assert not eb._alive(pid) and not eb._pid_file("hud").exists()
+assert eb.cmd_stop(ui, args) == 0          # idempotent
+print("launcher lifecycle OK")
+EOF
+```
 
 ## 8. Pre-existing regression envelope (unchanged, still binding)
 

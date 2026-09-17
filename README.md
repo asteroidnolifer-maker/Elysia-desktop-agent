@@ -14,11 +14,13 @@ and workers all run on `127.0.0.1`.
 | `elysia/` | Rearchitected core package: `core/master.py` (**master control plane**: goal -> planner -> durable task graph -> scheduler -> executor -> logical agents -> workspace -> QA -> review -> completion, plus `status`/`agents`/`report`), `core/config.py`, `core/paths.py` (secure path resolution), `core/providers.py`, `core/tasks.py`, `core/scheduler.py`, `core/executor.py` (in-process task execution), `core/agents.py` (logical roles), `core/fileblocks.py` (model-output file parser), `core/qa.py`, `core/events.py`, `core/git.py`, `core/workspace.py`, `core/toolcatalog.py` (machine capability detection), `core/briefing.py` (Jarvis-style status fusion), `core/jarvis.py` (natural-language front door), `core/knowledge.py` (multi-domain tooling docs) + more. `elysia/config.json` is the single source of configuration. |
 | Provider ecosystem | `core/provider_presets.py` — one catalog: local llama.cpp/Ollama, cloud OpenAI-compatible APIs (OpenRouter, Groq, Together, DeepSeek, Mistral, xAI, NVIDIA NIM, GitHub Models, Cerebras, Gemini, HuggingFace, Freebuff-style gateways) and CLI coding agents (Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw). A preset activates only when its credential env var is set (API) or its binary is on PATH (CLI). `core/browser_login.py` — `elysia login <provider>` opens the provider's console in the desktop browser and stores keys in `config/providers.env` (0600, git-ignored). |
 | `docs/` | `ARCHITECTURE_AUDIT.md` (Phase 1 audit), `ARCHITECTURE.md` (target architecture), `IMPLEMENTATION_STATE.md` (status of the rearchitecture), `knowledge/kali-tools/` (vendored defensive-first security-tooling docs, indexed by `elysia.core.knowledge`), `security/SECURITY_TOOLING.md` (tooling policy). |
-| `tests/` | `python3 -m unittest discover -s tests` — 194 unit tests (paths/security, providers, scheduler, QA, redaction, worker write security, features bundle, server API, provider presets/login/knowledge/HF, runtime wiring: crash recovery, lease heartbeat, failover, resource queueing, end-to-end executor: goal→file→QA→completion with failover/retry/dependencies, and the master control plane: full agent trace, failover, parallelism, dependency sequencing, restart recovery, cancellation, QA rollback). |
+| `tests/` | `python3 -m unittest discover -s tests` — 210 unit tests (paths/security, providers, scheduler, QA, redaction, worker write security, features bundle, server API, provider presets/login/knowledge/HF, runtime wiring: crash recovery, lease heartbeat, failover, resource queueing, end-to-end executor: goal→file→QA→completion with failover/retry/dependencies, the master control plane: full agent trace, failover, parallelism, dependency sequencing, restart recovery, cancellation, QA rollback, and the install/launch scripts: shim contract, dry-run safety, service spawn→stop lifecycle). |
 | `runtime/` | Local inference runtime (**not committed**: binaries/models). `restore-model.sh` downloads `llama-server` + Qwen GGUF into `runtime/llama/` + `runtime/models/`. |
 | `elysia-android/` | Android app (Gradle, AGP `8.13.2`, Kotlin `2.2.21`). Modules: `:app`, `:core`, `:device`, `:installer`, `:runtime`, `:models`, `:diagnostics`, `:permissions`. |
 | `workspace/` | Generated projects, `tools/` scripts, `docs/` notes. `workspace/repos/` (cloned test projects), `*.db`, `*.log`, `cache/` are git-ignored. |
-| `scripts/` | Task-board generators (`generate_*.py`, `gen_unique_tasks.py`). Run manually as needed. |
+| `scripts/` | `elysia_boot.py` — **universal installer + launcher** (Linux/macOS/Windows, stdlib only): `install`, `start`, `stop`, `restart`, `status`, `doctor`. Also task-board generators (`generate_*.py`, `gen_unique_tasks.py`). |
+| `install.sh` / `start.sh` | Linux + macOS shims: `./install.sh [--deps --build --with-model]`, `./start.sh [stop\|status\|doctor]`. |
+| `install.ps1` / `start.ps1` / `*.cmd` | Windows shims (PowerShell 5.1+/7+, plus double-click `.cmd` wrappers). |
 | `config/` | Local secrets (**never committed**, see `.gitignore`). Example: `config/composio.env`. |
 | `elysia-run.sh` | Unified launcher: starts `llama-server` (`:11434`) + `agent-core` (`:8085`). `start\|stop\|status\|restart`. Paths derive from the repo root; override with `ELYSIA_MODEL`, `ELYSIA_RUNTIME`, `ELYSIA_WS`, `ELYSIA_AGENT_BIN`. |
 | `elysia-home/` | Notes about the working-copy location (`.readme`). |
@@ -43,6 +45,67 @@ git clone git@github.com:asteroidnolifer-maker/Elysia-desktop-agent.git
 cd Elysia-desktop-agent
 git status
 ```
+
+## 1b. Install + launch (one script, all three platforms)
+
+`scripts/elysia_boot.py` is the single installer and launcher for Linux, macOS
+and Windows (stdlib only, no build step). The `.sh`, `.ps1` and `.cmd` files at
+the repo root are thin shims that only locate a Python 3 interpreter.
+
+```bash
+# Linux / macOS
+./install.sh                  # prerequisites, dirs, config; prints what to do next
+./install.sh --deps --build   # also install missing tools, then build agent-core
+./install.sh --with-model     # also fetch llama-server + a GGUF model
+./start.sh                    # start model API + agent-core + HUD
+./start.sh status             # ports, pids, board, executor
+./start.sh stop               # stop what start launched
+```
+
+```powershell
+# Windows (PowerShell)
+.\install.ps1 -Deps -Build
+.\start.ps1
+.\start.ps1 -Action status
+.\start.ps1 -Action stop
+# or double-click install.cmd / start.cmd
+```
+
+```bash
+# any platform, directly
+python3 scripts/elysia_boot.py install --dry-run   # show every action, change nothing
+python3 scripts/elysia_boot.py start --no-agent    # HUD only
+python3 scripts/elysia_boot.py doctor
+```
+
+What `install` does — and deliberately does not do:
+
+- checks Python 3.8+, `git`, `curl` (and `go` for the optional `agent-core` build)
+- creates `workspace/`, `runtime/models`, `runtime/llama`, `state/`, `logs/`, `config/`
+- writes `elysia/config.json` only if it is missing (existing config is kept)
+- normalizes `agent-core/agent_config.json` → absolute `workspace_dir` (the shipped
+  relative value would otherwise resolve against the binary and land the sandbox
+  in `agent-core/workspace`)
+- installs missing prerequisites **only** with `--deps`, using winget/choco/scoop,
+  Homebrew, or apt/dnf/pacman/zypper/apk, and asks before each one
+- never deletes user data, never edits API keys or `config/providers.env`
+- `--build` compiles `agent-core` with Go; without Go it reports SKIP with the
+  exact command instead of pretending to succeed
+- `--with-model` delegates to `runtime/restore-model.sh` when present; if that
+  fetcher is absent (it is git-ignored) it prints the two things to download
+  instead of inventing URLs
+- finishes with a `py_compile` check and `elysia doctor`, and writes
+  `state/install.json` (platform, paths, ports)
+
+`start` launches the model API (`:11434`), `agent-core` (`:8085`) and the
+HUD/orchestrator (`:8087`, canonical scheduler + in-process executor), waits
+for each port to answer, and writes pid files under `state/pids/` plus logs
+under `logs/`. It reports **up only after the port really answers**; `stop`
+verifies the process is gone before reporting success. Defaults are local-only
+(`127.0.0.1`) — pass `--host 0.0.0.0` deliberately to expose the HUD.
+
+Ports are overridable: `ELYSIA_MODEL_PORT`, `ELYSIA_AGENT_PORT`,
+`ELYSIA_API_PORT`, or `--port`.
 
 ## 2. Get a local model (required)
 

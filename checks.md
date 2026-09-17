@@ -9,7 +9,7 @@ Run these in order; the whole envelope must stay green.
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all tests pass** (currently 194), including the
+Expected: **all tests pass** (currently 210), including the
 `tests/test_features.py` bundle covering context budgeting, telemetry/cost,
 tool risk gating, computer permissions + shell gating, skills risk assessment
 (intent-based, false-positive free), templates expansion, research engine
@@ -31,7 +31,11 @@ planner -> durable task graph -> scheduler -> executor -> multiple logical
 agents -> real file writes -> QA -> tester -> git-diff reviewer -> completion,
 with provider failover, parallel independent work, dependency sequencing,
 restart recovery, cancellation, QA rejection rollback, and the agent/provider
-trace the master reports.
+trace the master reports — and `tests/test_boot_scripts.py`: the universal
+install/launch contract (every subcommand's `--help`, dry runs that change
+nothing, `start --dry-run` never claiming a service is up, shim `sh -n`/`bash
+-n` syntax, shims forwarding to `elysia_boot.py`, and the real spawn →
+liveness → stop → pid-cleanup lifecycle).
 
 ## 2. Compile check
 
@@ -101,7 +105,31 @@ completed `master run` prints the per-task status, the logical-agent order
 provider request/failure counts. Offline (no reachable provider) it exits
 non-zero with a clear provider error instead of pretending to work.
 
-## 7. Server endpoints against the new core
+## 7. Universal install + launch scripts
+
+`scripts/elysia_boot.py` is the single installer/launcher for Linux, macOS and
+Windows (stdlib only); `install.sh`/`start.sh`, `install.ps1`/`start.ps1` and
+the `.cmd` wrappers are thin Python-locator shims.
+
+```bash
+sh -n install.sh && bash -n start.sh            # POSIX + bash syntax
+python3 -m py_compile scripts/elysia_boot.py
+./install.sh --dry-run                          # every action, no writes
+./install.sh --dry-run --deps                   # exact package-manager command
+./start.sh --dry-run                            # exact service commands
+./start.sh status                               # ports/pids/binaries (--json too)
+./start.sh stop                                 # no-op when nothing runs
+```
+
+Expected: dry runs end with `dry run: nothing was changed` / `nothing was
+started` and touch nothing; `status` reports `down` for every port when
+nothing is listening (never an assumed UP); `stop` verifies the process is
+gone before reporting `stopped` (a surviving pid is reported FAIL); missing
+Go, model or `llama-server` produce SKIP plus the exact command to run, never
+a fake success. Covered in `howtotest.md` §7b, including a lifecycle check
+that spawns a sleeper and asserts `stop` really terminates it.
+
+## 8. Server endpoints against the new core
 
 `orchestrator/server.py` `/api/agent`, `/api/chat` (research/elysia intents)
 now call `elysia.core.server_api` (bounded threads, structured results,
