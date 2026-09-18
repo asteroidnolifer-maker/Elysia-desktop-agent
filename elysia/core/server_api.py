@@ -62,7 +62,8 @@ def master() -> MasterController:
             pm.register_many(cfg.providers)
         _MASTER = MasterController(TaskStore(_store_path()), pm,
                                    cfg.workspace.root, cfg=cfg,
-                                   resources=ResourceManager(), max_tasks=2)
+                                   resources=ResourceManager.from_config(cfg),
+                                   max_tasks=2)
         _MASTER_SIG = sig
     return _MASTER
 

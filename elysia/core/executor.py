@@ -37,7 +37,8 @@ class TaskExecutor:
                  heartbeat_interval_s: float = 120.0,
                  poll_interval_s: float = 2.0,
                  retry_backoff_s: float | None = None,
-                 capabilities: list[str] | None = None):
+                 capabilities: list[str] | None = None,
+                 tools=None, memory=None, resources=None):
         self.sched = scheduler
         self.store: TaskStore = scheduler.store
         self.providers: ProviderManager = scheduler.providers
@@ -49,6 +50,12 @@ class TaskExecutor:
         self.poll_interval_s = poll_interval_s
         self.capabilities = capabilities or ["chat", "coding"]
         self.retry_backoff_s = retry_backoff_s   # None -> pipeline default (30s)
+        # Permissioned tool layer shared by every pipeline this executor runs.
+        self.tools = tools
+        # Layered memory (Phase 9) and resource manager shared by every
+        # pipeline — one store per process, never one per task.
+        self.memory = memory
+        self.resources = resources
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._inflight: set[int] = set()
@@ -125,7 +132,9 @@ class TaskExecutor:
         hb.start()
         try:
             pipeline = AgentPipeline(self.providers, self.store,
-                                     events=self.events, cfg=self._cfg())
+                                     events=self.events, cfg=self._cfg(),
+                                     tools=self.tools, memory=self.memory,
+                                     resources=self.resources)
             if self.retry_backoff_s is not None:
                 pipeline._backoff_s = lambda: float(self.retry_backoff_s)
             outcome = pipeline.solve_task(task, self.workspace_root,
@@ -135,7 +144,16 @@ class TaskExecutor:
             result = outcome.get("result") or outcome.get("error") or ""
             if ok:
                 # solve_task completes to "reviewing"; finish the lifecycle.
-                self.sched.finish(tid, worker, "completed", result)
+                # The task is ALREADY effectively done once the store records
+                # it, so a failure while finalising (releasing the provider
+                # slot, emitting the event) must not be reported as a task
+                # failure — it is counted as executed and logged as such.
+                try:
+                    self.sched.finish(tid, worker, "completed", result)
+                except Exception as e:  # noqa: BLE001
+                    self.events.emit("executor", status="finalise_failed",
+                                     task_id=tid, agent_id=worker,
+                                     error=f"finish failed after completion: {e}"[:200])
                 self.stats["executed"] += 1
                 self.events.emit("task.completed", task_id=tid, status="completed",
                                  agent_id=worker)
@@ -161,10 +179,22 @@ class TaskExecutor:
         t = self.store.get(tid)
         if t is None:
             return
+        if t["status"] in ("completed", "done", "cancelled"):
+            # Already resolved (e.g. a late exception after a successful
+            # finalise): never rewrite a finished task or fake a retry.
+            self.sched.release_reserved(tid)
+            return
         self.stats["failed"] += 1
         if t["status"] not in ("ready", "failed"):
             # pipeline exception path: apply the retry policy now
-            self.store.fail_attempt(tid, reason[:500], backoff_s=30)
+            before = t["status"]
+            try:
+                self.store.fail_attempt(tid, reason[:500], backoff_s=30)
+            except ValueError as e:
+                # illegal edge (a race with recovery/cancel): report, never crash
+                self.events.emit("executor", status="unresolvable_failure",
+                                 task_id=tid, agent_id=worker,
+                                 error=f"{before} -> retry refused: {e}"[:200])
             t = self.store.get(tid)
         if t["status"] == "ready":
             self.stats["retried"] += 1

@@ -104,8 +104,15 @@ class ResearchConfig:
 class ToolsConfig:
     enabled: bool = True
     allow_high_risk: bool = False
+    #: Ceiling for every role's grants — permission tokens or level names
+    #: (read_only, workspace_write, git_write, network, browser, desktop,
+    #: system). A role can never be granted more than this.
     default_permissions: list = field(default_factory=lambda: [
         "workspace:read", "workspace:write", "system:info"])
+    #: Per-role overrides, still capped by the ceiling above.
+    role_permissions: dict = field(default_factory=dict)
+    #: Allow the system:shell permission (test running, diagnostics).
+    enable_shell: bool = False
 
 
 @dataclass
@@ -355,6 +362,11 @@ def apply_dict(cfg: Config, data: dict) -> None:
             cfg.tools.allow_high_risk = t["allow_high_risk"]
         if isinstance(t.get("default_permissions"), list):
             cfg.tools.default_permissions = [str(x) for x in t["default_permissions"]]
+        if isinstance(t.get("role_permissions"), dict):
+            cfg.tools.role_permissions = {str(k): _strlist(v)
+                                          for k, v in t["role_permissions"].items()}
+        if isinstance(t.get("enable_shell"), bool):
+            cfg.tools.enable_shell = t["enable_shell"]
     if isinstance(data.get("model_routing"), dict):
         mr = data["model_routing"]
         if isinstance(mr.get("default_capabilities"), list):

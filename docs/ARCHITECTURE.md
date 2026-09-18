@@ -87,14 +87,22 @@ new architecture. Components:
 | Paths | `elysia/core/paths.py` | Canonical workspace root + `resolve()` that rejects `..`, absolute escape, symlink escape and anything outside the workspace. |
 | Events | `elysia/core/events.py` | Structured event bus (run_id, task_id, agent_id, provider, model, timestamp, type, status, error, duration). |
 | Workspace | `elysia/core/workspace.py` | File-ownership enforcement + read/reference access + concurrent-modification detection. |
-| Providers | `elysia/core/providers.py` | Provider registry: OpenAI-compatible, local llama.cpp/Ollama, NIM, CLI (opencode/claude/codex), generic. Health + capabilities + rate limit tracking. |
+| Providers | `elysia/core/providers.py` | Provider registry: OpenAI-compatible, local llama.cpp/Ollama, NIM, CLI (opencode/claude/codex), generic. Capability requirement passes (strict, then documented soft fallback), atomic slot reservation, estimated-spend budget gate, and a full health model: consecutive failures, circuit breaker (closed/open/half-open with doubling capped cooldown), quarantine that excludes a provider from selection, a bounded incident timeline, a last-20-outcomes success rate, and one-shot `provider.quarantined`/`half_open`/`recovered` events. `capacity()`/`availability_report()`/`explain()` expose all of it, never a bare verdict. |
 | Tasks | `elysia/core/tasks.py` | Task schema: id, title, description, status, priority, dependencies, owned files, read files, worker, provider, model, attempts, heartbeats, lease expiry, result, test status. |
 | Scheduler | `elysia/core/scheduler.py` | Dependency-aware scheduling with leases, heartbeats, retries, provider/agent selection. Resource-aware (RAM/CPU). No hard `MAX_DIVISION = 6`. |
 | QA | `elysia/core/qa.py` | Language-aware validation: py_compile, gofmt/go vet/go test, tsc/npm test, gradle, shell syntax/shellcheck, strict JSON. |
 | Git | `elysia/core/git.py` | status awareness, dirty detection, conflict detection, checkpoint commits. Never commits secrets/runtime state. |
 | Resources | `elysia/core/resources.py` | RAM/CPU budget model: how many local workers can run, provider session usage. |
-| Tools | `elysia/core/tools.py` | Tool registry with name/description/input schema/output schema/permissions/timeout. Permissioned invocation. |
-| Memory | `elysia/core/memory.py` | Structured project/task/agent/provider/run state (context.md is a human layer over this). |
+| Tools (mechanism) | `elysia/core/tools.py` | Tool registry: `ToolSpec` (name/description/schema/permissions/timeout/risk/destructive/preview) and `ToolRegistry.invoke` — risk gate, permission gate, dry-run preview, audit events. |
+| Tools (runtime surface) | `elysia/core/toolkit.py` | The canonical tool layer agents actually use: permission levels (`read_only`, `workspace_write`, `git_write`, `network`, `browser`, `desktop`, `system`), the per-role grant map (reviewers are read-only by construction, deny-by-default for unknown roles), and real tools over Workspace/QA/git/computer: `fs.read|list|search|write|remove`, `qa.validate|run_tests`, `git.status|diff|checkpoint`, `system.info`, `browser.open_url` (SSRF-guarded), `knowledge.search`, `desktop.*`, `clipboard.*`. `AgentPipeline` writes owned files through it, so a refusal is a loud QA failure rather than a silent success. |
+| Health | `elysia/core/health.py` | Ten independent health dimensions (providers, scheduler, task_store, workspace, resources, security, tests, git, memory, installation) with `ok`/`warn`/`fail`/`unknown` verdicts and no aggregate score. |
+| Workflow engine | `elysia/core/workflow.py` | Real node semantics over the durable task graph: `task`, `approval` (human gate; blocks downstream until resolved, denial cascades), `join` (fan-in; completes on all-success, fails on any failure), `fallback` (executes only when its primary failed), `retry`, `timeout`, `rollback` (verifies the checkpoint exists; never a destructive reset), `fail`. Gates are board rows (`kind='gate:*'`) that `TaskStore.claim` refuses, so no worker can execute them; `tick()` promotes and evaluates gates through the canonical state machine — there is no second state store. |
+| Provider budget | `elysia/core/providers.py` (`set_budget`/`budget_status`/`explain`) | Estimated-spend accumulation per call, a warning threshold, and a hard ceiling: when exceeded, paid provider kinds are dropped from `_eligible()` and `reserve()` while zero-cost (local) providers keep serving; an all-paid fleet honestly refuses to reserve (the task queues). Spend figures are labelled estimates, not billing data. |
+| DB hardening | `elysia/core/tasks.py` (`health_check`/`backup`/`restore`/`vacuum`, `_migrate`) | WAL + busy timeout + `user_version`-based migrations, integrity check with malformed-row detection, consistent online backup via SQLite's backup API, restore that verifies integrity first and refuses non-SQLite content, and vacuum/compaction. |
+| Memory | `elysia/core/memory.py` | Layered persistent memory: one namespace per concern (session, conversation, task, workflow, project, repo, user_prefs, agents, providers, failure, solution, decision, architecture, research, tools, history) with per-record importance, confidence, provenance, TTL, recall counters and a content hash. Duplicate content is merged instead of duplicated; compaction drops expired records and compresses the oldest beyond the per-namespace cap into a summary record that keeps the keys it replaced; backup/restore round-trips and refuses corrupt input. `rec_about()`/`recall()` return an explainable score. |
+| Context planner | `elysia/core/context.py` (`ContextPlanner`) | Decides what one agent call actually needs: layers (system, task, files, failures, tests, memory, review, provider, capabilities) compete for a token budget by per-role priority, a long layer is truncated to its recent tail, every included/dropped layer is reported with source and reason, and the plan is cached until an input changes. `ContextBuilder` remains the simple layered assembler. |
+| Self-healing | `elysia/core/healing.py` | One failure taxonomy (29 classes) with an explicit policy per class: retryable, action (retry / retry_after / failover / replan / escalate / give_up), base backoff, model hint, named recovery routine and a bounded retry cap. `classify()` reports the evidence it used; the configured `retry_backoff_s` is the per-attempt base and the class scales it exponentially with deterministic jitter (capped). `Healer.handle()` runs the recovery, verifies where verification is possible (otherwise `None`, never a fake `True`), records failure memory and emits `task.healing`. Git conflicts and permission/auth failures escalate to a human instead of being auto-"fixed". |
+| Task-graph intelligence | `elysia/core/graph.py` | Static analysis of a plan before anything runs: unknown/self dependencies, cycles, duplicate file ownership, overlapping modification without a dependency, existing-vs-new files, tasks no provider can execute, oversized/trivial tasks, plus per-task complexity/duration/token estimates (labelled heuristics). `replan()` applies safe mechanical repairs and remaps dependencies through an explicit old→new table, so splitting points dependents at every part and merging can never leave a stale index or a cycle. |
 
 ### Old `orchestrator/` (being migrated)
 
@@ -107,6 +115,41 @@ Kept until each piece is replaced and verified:
 - `brain.py` → becomes a thin wrapper over `elysia/core/providers.py` (local
   provider).
 - `adaptive.sh`, `monitor.py` → wrapper scripts that start the scheduler.
+
+### Memory, context, healing and graph wiring
+
+Nothing in the list above is a side library — each is on the live call path:
+
+```
+MasterController
+  -> plan()            AgentPipeline.plan_task (project intel in the prompt)
+                       -> graph.analyze() -> graph.replan()  (safe repairs, reported)
+                       -> memory.remember_decision()
+  -> TaskExecutor      AgentPipeline.solve_task
+       -> ContextPlanner  (task + owned files + classified prior failure +
+                           recalled memory + last test result + provider trace,
+                           inside a token budget, cache-invalidated on change)
+       -> provider         (ProviderManager: capability/health/concurrency/budget)
+       -> tool layer       (fs.write through toolkit, denied writes fail QA)
+       -> QA / tester / reviewer
+       -> on failure       Healer.handle() -> classify, recover, verify, record
+                           (bounded retries, class-scaled backoff, task.healing event)
+       -> on success       memory.remember_solution() + remember_task_context()
+```
+
+### Simulation, routing and audit
+
+- `MasterController.simulate(goal)` dry-runs a plan: it reports the files that
+  would change, conflicting file ownership, circular dependencies, roles that
+  cannot write and roles no provider can serve — and writes nothing (no files,
+  no board rows, no scheduler start).
+- `ProviderManager.explain(capabilities)` returns a read-only routing trace:
+  the strict pass, the documented soft-capability fallback, each candidate's
+  rejection reason, priority order, free slots and whether health was probed.
+  `select()` and `explain()` share `_eligible()` so criteria cannot drift.
+- Every tool invocation and file change is an event (`tool.invoke`,
+  `tool.result`, `file.changed`, `tool.quarantined`), so the audit trail is
+  reconstructable from the event journal rather than from logs or process names.
 
 ### Python host (`workspace/tools/`)
 

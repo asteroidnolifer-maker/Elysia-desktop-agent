@@ -12,15 +12,116 @@ cd Elysia-desktop-agent          # repo root
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all 210 tests pass** — the original 88 plus the new
+Expected: **all 341 tests pass** — the original 88 plus the new
 `tests/test_providers_plus.py` bundle (provider presets, config integration,
 prompt styles, browser login store, knowledge base, HuggingFace catalog),
 the `tests/test_runtime_wiring.py` bundle (scheduler-in-server crash recovery,
 worker lease heartbeat, provider failover on timeout/429/unavailable/crash,
 concurrency=1 isolation, resource-queue budget gate, symlink-escape and
 invalid-tool-argument rejection), and the `tests/test_master_control.py`
-bundle (see §1c) and the `tests/test_boot_scripts.py` bundle (install/launch
-script contract; see §7b). No key, no network, no model required.
+bundle (see §1c), the `tests/test_boot_scripts.py` bundle (install/launch
+script contract; see §7b), the `tests/test_tool_layer.py` bundle (see §1d),
+the `tests/test_db_budget_workflow.py` bundle (DB hardening, budget
+enforcement, workflow gates — see §1e), the `tests/test_memory_context_healing.py`
+bundle (see §1f) and the `tests/test_task_graph.py` bundle (see §1g). No key,
+no network, no model required.
+
+### 1f. Layered memory, context planner, self-healing
+
+`tests/test_memory_context_healing.py` exercises the three subsystems that sit
+behind every model call, with real objects (real on-disk memory store, real
+SQLite board, real pipeline over a scripted transport):
+
+- **memory** — importance/confidence/provenance are stored and returned by
+  retrieval; identical content is deduplicated; recall scores are explainable
+  (`why: keyword=… importance=… recency=…`) and recall counts are bumped; TTL
+  expiry; invalidation and correction keep an audit trail; compaction reports
+  the expired count and compresses the oldest records into a summary that keeps
+  the keys it replaced; backup/restore round-trips and *refuses* missing or
+  corrupt files instead of wiping live memory.
+- **context planner** — the token budget is honoured, priorities decide which
+  layers make it, truncation keeps the recent tail and states how much was
+  omitted, dropped layers carry a reason, the plan is cached until an input
+  changes, and roles get different priorities.
+- **healing** — 23 documented failure texts and 3 exception types classify with
+  their evidence; retries are bounded per class (`give_up` at the cap, no
+  infinite loop); backoff grows and is deterministic under jitter; recovery
+  routines really run (a stale lease is released on a real board, disk pressure
+  really compacts memory and vacuums the DB) and report honestly when nothing
+  is attached; `git_conflict` escalates and leaves the task untouched.
+- **live path** — a QA failure is classified, recorded in failure memory and
+  emitted as a `task.healing` event, and the retry prompt then contains the
+  classified failure plus the "DO THIS DIFFERENTLY" hint from the classifier;
+  a success lands in solution memory together with its context report; an
+  implementer that returns no parseable file block is a real failure, never a
+  silent "wrote 0 files".
+
+### 1g. Task graph intelligence and replanning
+
+`tests/test_task_graph.py` proves the analyser and the repair pass over real
+plans, the real workspace and the real provider fleet: unknown/self deps and
+cycles are found with their path; two writers of one file are a blocker; a task
+that mentions another task's file without depending on it is flagged (and the
+warning disappears once the dependency exists); existing and new files are told
+apart; a role no provider can serve is a blocker and one that can is not;
+oversized/trivial tasks are identified; estimates are per task and labelled
+heuristics. Then `replan()`: invalid edges dropped, cycles broken, duplicate
+owners merged with dependents rewired, an oversized task split into one task
+per file with dependents pointed at **every** part, trivial merges opt-in only,
+no repair can introduce a structural problem, and replanning a repaired plan
+changes nothing (idempotent). Finally the master: `plan()` returns the analysis
+and the repairs it applied, `simulate()` stays a dry run while reporting the raw
+conflicts, the repairs available for an explicit plan and the estimates, and a
+read-only role is a blocking `no_write_permission`.
+
+### 1e. DB hardening, budget enforcement, workflow engine
+
+`tests/test_db_budget_workflow.py` uses real subsystems only: the SQLite
+TaskStore (WAL, versioned migrations, integrity check, online backup/restore,
+vacuum), a real ProviderManager over a scripted transport (over budget → paid
+providers dropped, local still serves, all-paid honestly refuses), and the
+workflow engine persisting gate nodes onto the real board: approvals block
+downstream work until a human resolves them and denial cascades; joins wait for
+all siblings and fail on any failure; fallback runs only when its primary
+failed; timeout fails a stuck child through the store; rollback refuses unknown
+checkpoints; gate rows can never be claimed by a worker; static validation
+rejects cycles and orphan refs.
+
+### 1d. Runtime tool layer, simulation, routing, health
+
+`tests/test_tool_layer.py` proves the permissioned tool layer that the live
+pipeline now writes through: deny-by-default for unknown tools and roles,
+reviewers that can never write even when config asks, traversal/absolute-path/
+symlink-escape refusal, dry-run previews that change nothing on disk, the
+desktop two-key gate (policy AND permission) with an honest "backend
+unavailable" on headless hosts, the SSRF guard (loopback/link-local/private/
+bad scheme), planning simulation that writes nothing, routing explanations with
+rejection reasons, and the ten independent health dimensions. Its live test
+drives the real MasterController: the file appears on disk **and** a
+`file.changed`/`tool.invoke` audit event with `fs.write` proves the write went
+through the registry — and with a read-only permission ceiling the same task
+fails loudly and writes nothing.
+
+### 1h. Provider health: circuit breaker, quarantine, half-open recovery
+
+`tests/test_providers_plus.py::ProviderHealthCircuitTests` (Phase 7) drives real
+`Provider`/`ProviderManager` objects with scripted outcomes:
+
+- consecutive failures trip the circuit at the threshold, and a quarantined
+  provider is **not** reserved — `explain()` says
+  `circuit open after N trip(s)/M failures, Xs cooldown left` instead of the
+  vaguer `health=degraded` (quarantine is checked before the coarse status);
+- after the cooldown exactly ONE half-open probe is let through, and a second
+  reserve waits for that probe's outcome;
+- a successful probe closes the circuit (and publishes `provider.recovered`),
+  a failed probe re-quarantines **longer** (each trip doubles, capped);
+- an abandoned probe ticket expires, so a lost reservation can never lock a
+  provider out permanently;
+- the success rate is a real window of the last 20 outcomes (`None` before any
+  call — never an invented number) and the incident timeline is bounded;
+- a run-time boundary: with one broken and one healthy provider the healthy
+  peer serves, `provider.quarantined` appears once on the event timeline, and
+  the health dimension reports `N quarantined (circuit open)`.
 
 ### 1c. Master control plane (goal -> agents -> files -> review)
 
@@ -106,6 +207,18 @@ kill %1
 ./bin/elysia jarvis --deep "latest llama.cpp features"  # -> deep research
 ./bin/elysia jarvis "add retry to the exporter"         # -> master control plane
 ./bin/elysia master agents | status | run "<goal>"
+./bin/elysia master route --caps chat,coding      # provider decision trace
+./bin/elysia master simulate "<goal>"             # dry run: plan + graph + estimates
+./bin/elysia master simulate "x" --file plan.json # analyse a plan offline
+./bin/elysia memory stats | timeline [--ns NS] | recall "<query>"
+./bin/elysia memory backup [PATH] | compact | invalidate --ns NS --key K
+./bin/elysia healing policies | report | classify "<error text>"
+./bin/elysia tools --registry                     # runtime tools + permissions
+./bin/elysia tools --registry --role implementer  # allow/deny per role + reason
+./bin/elysia health                               # ten independent dimensions
+./bin/elysia db health | backup DIR | restore F | vacuum
+./bin/elysia workflow start --file nodes.json --name demo | tick | state demo
+./bin/elysia workflow approve --node ID           # or deny (cascades)
 ```
 
 All of these must exit 0 with no traceback even with zero credentials and no

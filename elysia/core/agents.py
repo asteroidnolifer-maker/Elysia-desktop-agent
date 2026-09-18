@@ -23,8 +23,9 @@ import time
 
 from .agents_context import build_agent_context
 from .config import Config
-from .context import ContextBuilder
+from .context import ContextBuilder, ContextPlanner
 from .events import EventBus
+from .healing import MAX_BACKOFF_S, Healer, classify
 from .memory import Memory
 from .providers import ProviderManager
 from .resources import ResourceManager
@@ -65,16 +66,137 @@ class AgentPipeline:
                  events: EventBus | None = None, cfg: Config | None = None,
                  memory: Memory | None = None,
                  correlation: Correlation | None = None,
-                 execution_history: ExecutionHistory | None = None):
+                 execution_history: ExecutionHistory | None = None,
+                 tools=None):
         self.providers = providers
         self.store = store
         self.resources = resources
         self.events = events or EventBus()
         self.cfg = cfg
+        # Canonical permissioned tool layer (elysia.core.toolkit.ToolLayer).
+        # When attached, every file write/read the pipeline performs goes
+        # through it, so per-role permissions are enforced on the live path.
+        self.tools = tools
         self.memory = memory or Memory(getattr(cfg, "memory", None)
                                        and cfg.memory.dir or "state/memory")
         self.correlation = correlation or Correlation()
         self.history = execution_history or ExecutionHistory()
+        # Canonical failure classifier/recoverer (Phase 21). It is the ONE
+        # place a failure is turned into an action, so retries, failover and
+        # escalation agree everywhere in the runtime.
+        self.healer = Healer(store=store, memory=self.memory, events=self.events,
+                             providers=providers, resources=resources)
+
+    # -- context planning -----------------------------------------------------
+    #: Token budget for one implementer call. Kept modest so low-resource
+    #: hardware (2-core/16 GB) is not asked to hold a whole repository.
+    IMPLEMENTER_BUDGET_TOKENS = 6000
+    #: How much of each owned file is included as "what exists today".
+    FILE_LAYER_CHARS = 2500
+
+    def _current_file_text(self, ws, path: str) -> str:
+        """Existing content of an owned file (empty when it does not exist)."""
+        try:
+            if self.tools is not None:
+                res = self.tools.invoke("fs.read", {
+                    "path": path, "max_chars": self.FILE_LAYER_CHARS},
+                    "implementer")
+                if res.get("ok"):
+                    return ((res.get("data") or {}).get("content") or "")
+                return ""
+            if not ws.exists(path):
+                return ""
+            return ws.read(path, max_chars=self.FILE_LAYER_CHARS)
+        except Exception:  # noqa: BLE001 — context must never break a task
+            return ""
+
+    def _failure_memories(self, task: dict, goal: str, limit: int = 3) -> list:
+        try:
+            return self.memory.rec_about(task, extra_terms=[goal], limit=limit)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def implementer_messages(self, task: dict, ws, owned: list[str]) -> tuple:
+        """Assemble the implementer prompt through the context planner.
+
+        Answers "what does this agent actually need?" instead of dumping the
+        repository: the task, the current content of only the files it owns,
+        what failed before and how it was classified, the last test result,
+        relevant memory, and the provider constraints in force.
+        """
+        tid = task.get("id")
+        spec = task.get("description") or task.get("title") or ""
+        planner = ContextPlanner(budget_tokens=self.IMPLEMENTER_BUDGET_TOKENS,
+                                 role="implementer")
+        planner.add("system", "You are the Elysia implementer writing "
+                              "repository files.", required=True)
+        planner.add(
+            "task",
+            (f"TASK: {task.get('title','')}\nDETAILS: {spec}\n"
+             f"FILES YOU OWN (write complete content for these only): {owned}\n"
+             f"Workspace root: {ws.root}\n\n"
+             "Output each file as a fenced code block whose opening fence line "
+             "ends with the relative path, e.g. ```md README.md. Never invent "
+             "paths outside the workspace."),
+            source="task")
+        current = {}
+        for p in owned:
+            body = self._current_file_text(ws, p)
+            if body:
+                current[p] = body
+        if current:
+            planner.add("files", ContextPlanner.file_layer(current),
+                        source="workspace.read")
+        last_error = task.get("last_error")
+        prior = self._failure_memories(task, spec)
+        classification = None
+        if last_error:
+            cls = classify(last_error, attempt=task.get("attempts") or 1,
+                           task_id=tid)
+            classification = {"kind": cls["kind"], "action": cls["action"],
+                              "retryable": cls["retryable"],
+                              "hint": cls["hint"]}
+            planner.add("failures",
+                        ContextPlanner.failure_layer(prior, classification),
+                        source="healing.classify")
+            if cls.get("hint"):
+                planner.add("failures", f"DO THIS DIFFERENTLY: {cls['hint']}",
+                            source="healing.hint")
+        elif prior:
+            planner.add("failures", ContextPlanner.failure_layer(prior),
+                        source="memory.failure")
+        test_text = ContextPlanner.test_layer(
+            task.get("test_status") or task.get("result"))
+        if test_text:
+            planner.add("tests", f"previous run: {test_text}",
+                        source="task.result")
+        memories = [h for h in prior if h.get("namespace") in
+                    ("solution", "decision", "project")]
+        if memories:
+            planner.add("memory", ContextPlanner.memory_layer(memories),
+                        source="memory.recall")
+        caps = self._role_caps("implementer")
+        try:
+            route = self.providers.explain(capabilities=caps) if self.providers \
+                else {}
+        except Exception:  # noqa: BLE001
+            route = {}
+        if route:
+            planner.add("provider", ContextPlanner.provider_layer(route),
+                        source="providers.explain")
+        plan = planner.plan(cache_key=f"implementer:{tid}")
+        if tid is not None:
+            try:
+                self.memory.remember_task_context(
+                    task, {"context_report": plan["report"],
+                           "context_tokens": plan["report"]["used_tokens_est"]})
+            except Exception:  # noqa: BLE001
+                pass
+        messages = [{"role": "system",
+                     "content": "You are the Elysia implementer writing "
+                                "repository files."},
+                    {"role": "user", "content": plan["prompt"]}]
+        return messages, plan["report"]
 
     # -- provider selection with fallback ------------------------------------
     def _execute(self, messages, capabilities, task_id=None):
@@ -135,23 +257,25 @@ class AgentPipeline:
                 self.store.transition(tid, "running")
             except Exception:  # already past running is fine
                 pass
-        prompt = (
-            f"TASK: {task.get('title','')}\nDETAILS: {spec}\n"
-            f"FILES YOU OWN (write complete content for these only): {owned}\n"
-            f"Workspace root: {ws.root}\n\n"
-            "Output each file as a fenced code block whose opening fence line "
-            "ends with the relative path, e.g. ```md README.md. Never invent "
-            "paths outside the workspace.")
-        messages = [{"role": "system", "content":
-                     "You are the Elysia implementer writing repository files."},
-                    {"role": "user", "content": prompt}]
+        messages, context_report = self.implementer_messages(task, ws, owned)
         text, err = self._call(messages, "implementer", task_id=tid,
                                reservation=reservation)
         if err:
-            return self._stage_fail(tid, "running", f"implementer: {err}")
+            return self._stage_fail(tid, "running", f"implementer: {err}",
+                                    task=task)
 
         from .fileblocks import parse_file_blocks
         files = parse_file_blocks(text, owned)
+        if not files:
+            # An implementer that emits no parseable file block cannot have
+            # changed anything — classify it and let the scheduler retry with
+            # an explicit "reply with fenced blocks" hint.
+            self.events.emit("agent.run", agent_id="implementer", task_id=tid,
+                             status="error", detail="no parseable file blocks")
+            return self._stage_fail(
+                tid, "running",
+                "implementer: no file blocks produced (empty or malformed "
+                "model output)", task=task)
         written, qa_failures = [], []
         for path, content in files.items():
             # SECURITY: the model may emit a path outside the task's owned
@@ -162,8 +286,11 @@ class AgentPipeline:
                 qa_failures.append(f"{path}: not in owned files")
                 continue
             try:
-                prior = ws.read(path) if ws.exists(path) else None
-                ws.write_owned(path, content)
+                prior = self._read_prior(ws, path)
+                denied = self._write_owned(ws, path, content)
+                if denied:
+                    qa_failures.append(f"{path}: {denied}")
+                    continue
                 ok, reason = validate_file(path, content)
                 if ok:
                     written.append(path)
@@ -198,49 +325,137 @@ class AgentPipeline:
 
         if qa_failures:
             msg = "QA failed: " + "; ".join(qa_failures[:5])
-            return self._stage_fail(tid, "testing", msg)
+            return self._stage_fail(tid, "testing", msg, task=task)
         lines = [f"wrote {len(written)} file(s): {', '.join(written[:5])}"]
         if test_result:
             lines.append(test_result)
         if review:
             lines.append(review[:300])
+        summary = "\n".join(lines)
         if tid is not None:
-            self.store.complete(tid, "reviewing", "\n".join(lines))
-        return {"ok": True, "status": "reviewing", "result": "\n".join(lines),
-                "tests": test_result, "review": review}
+            self.store.complete(tid, "reviewing", summary,
+                                test_status=test_result or None)
+        # solution + task memory: the next task that looks like this one can
+        # reuse what worked (and what it cost in context tokens).
+        try:
+            self.memory.remember_solution(task, summary, files=written)
+            if test_result or review:
+                self.memory.remember_task_context(
+                    task, {"test_result": test_result[:400],
+                           "review": review[:400],
+                           "context_report": context_report})
+        except Exception:  # noqa: BLE001 — memory must never fail a task
+            pass
+        return {"ok": True, "status": "reviewing", "result": summary,
+                "tests": test_result, "review": review,
+                "context": context_report}
 
-    @staticmethod
-    def _rollback_file(ws, path: str, prior: str | None) -> None:
+    # -- permissioned workspace access (tool layer when attached) -------------
+    def _write_owned(self, ws, path: str, content: str) -> str:
+        """Write an owned file; return a denial reason ("") when it succeeded.
+
+        With a tool layer attached the write is a permission-checked tool call:
+        a role without ``workspace:write`` cannot write at all, and the refusal
+        is reported as a QA failure instead of being silently ignored.
+        """
+        if self.tools is None:
+            ws.write_owned(path, content)
+            return ""
+        res = self.tools.invoke("fs.write", {"path": path, "content": content},
+                                "implementer")
+        if res.get("ok"):
+            return ""
+        return f"tool fs.write refused: {res.get('error') or 'denied'}"
+
+    #: Cap for reading a file back before overwriting it. Must NOT be the
+    #: 9 KiB reference read limit, or a QA rollback would silently truncate a
+    #: larger original file.
+    ROLLBACK_READ_CHARS = 5_000_000
+
+    def _read_prior(self, ws, path: str) -> str | None:
+        """Previous content of a file we are about to overwrite (or None)."""
+        if self.tools is not None:
+            res = self.tools.invoke("fs.read", {
+                "path": path, "max_chars": self.ROLLBACK_READ_CHARS}, "implementer")
+            if res.get("ok"):
+                return ((res.get("data") or {}).get("content"))
+            return None
+        if not ws.exists(path):
+            return None
+        return ws.read(path, max_chars=self.ROLLBACK_READ_CHARS)
+
+    def _rollback_file(self, ws, path: str, prior: str | None) -> None:
         """Undo a write whose content failed QA (best effort, never raises)."""
         import os
         try:
             if prior is None:
-                os.remove(ws.resolve(path))
+                if self.tools is not None:
+                    self.tools.invoke("fs.remove", {"path": path}, "implementer")
+                else:
+                    os.remove(ws.resolve(path))
             else:
-                ws.write_owned(path, prior)
+                self._write_owned(ws, path, prior)
         except Exception:  # noqa: BLE001 — a failed cleanup must not mask the QA failure
             pass
 
     def _run_tests(self, ws, timeout=120) -> str:
-        """Best-effort test runner via the QA harness (no unsafe shell)."""
-        from elysia.core.qa import run as qa_run
-        for cmd in (["python3", "-m", "pytest", "-q"],
-                    ["python3", "manage.py", "test", "--verbosity=1"]):
-            if command_exists(ws.root, cmd[0]):
-                rc, out = qa_run(cmd, cwd=ws.root, timeout=timeout)
-                if out:
-                    head = out.strip().splitlines()
-                    return f"tests ({cmd[0]}): rc={rc} :: {head[-1][:120] if head else ''}"
-        return ""
+        """Run the project's tests through the QA harness (no unsafe shell).
 
-    def _stage_fail(self, tid, status, reason):
+        Discovery is the ONE canonical helper (elysia.core.toolkit) shared with
+        the ``qa.run_tests`` tool, so pytest/go/cargo/npm projects are detected
+        the same way wherever tests are launched.
+        """
+        import os
+        from elysia.core.qa import run as qa_run
+        from elysia.core.toolkit import discover_test_command
+        cmd, kind = discover_test_command(ws.root)
+        if not cmd:
+            if os.path.exists(os.path.join(ws.root, "manage.py")):
+                cmd, kind = (["python3", "manage.py", "test", "--verbosity=1"],
+                             "django")
+            else:
+                return ""
+        rc, out = qa_run(cmd, cwd=ws.root, timeout=timeout)
+        head = (out or "").strip().splitlines()
+        return f"tests ({kind}): rc={rc} :: {head[-1][:120] if head else ''}"
+
+    def _stage_fail(self, tid, status, reason, task=None):
+        """Classify a stage failure, recover what is safe, record it.
+
+        The classification decides the retry backoff (exponential per failure
+        class, jittered) and whether the action is retry / failover / replan
+        / escalate / give up. Recovery routines that are safe to run here
+        (releasing a stale lease, reclaiming disk) are executed.
+        """
+        failure = None
         if tid is not None:
             try:
-                self.store.fail_attempt(tid, reason, backoff_s=self._backoff_s())
+                failure = self.healer.handle(reason, task or {"id": tid},
+                                             attempt=(task or {}).get("attempts"))
+            except Exception:  # noqa: BLE001 — healing must never mask a failure
+                failure = None
+        # Retry cadence: the configured ``retry_backoff_s`` is the base for
+        # THIS attempt and the failure class scales it exponentially (with
+        # jitter), so a provider timeout genuinely waits longer each time
+        # without hard-coding one global delay.
+        backoff = self._backoff_s()
+        if failure and failure.get("backoff_growth"):
+            backoff = round(min(backoff * float(failure["backoff_growth"]),
+                                MAX_BACKOFF_S), 2)
+        detail = reason
+        if failure:
+            detail = (f"{reason} [healing: {failure['kind']} -> "
+                      f"{failure['action']} backoff={backoff:.1f}s]")
+        if tid is not None:
+            try:
+                self.store.fail_attempt(tid, detail, backoff_s=backoff)
             except Exception:  # noqa: BLE001
                 pass
-        return {"ok": False, "status": status, "error": reason,
-                "result": reason}
+        out = {"ok": False, "status": status, "error": reason,
+               "result": detail}
+        if failure:
+            out["healing"] = failure
+        return out
 
     def _backoff_s(self) -> float:
         sc = getattr(self.cfg, "scheduler", None) if self.cfg else None
@@ -265,12 +480,25 @@ class AgentPipeline:
     # -- stage: planner ------------------------------------------------------
     def plan_task(self, goal: str, workspace_summary: str = "") -> dict:
         ctx = build_agent_context(self.cfg, goal, workspace_summary)
+        # long-term memory: past decisions/solutions and known failures for a
+        # goal like this one, so planning does not repeat a known dead end.
+        planner = ContextPlanner(budget_tokens=3000, role="planner")
+        planner.add("task", ctx, required=True, source="agents_context")
+        try:
+            memories = self.memory.rec_about(
+                {"title": goal, "description": goal}, limit=4)
+        except Exception:  # noqa: BLE001
+            memories = []
+        if memories:
+            planner.add("memory", ContextPlanner.memory_layer(memories),
+                        source="memory.recall")
+        plan = planner.plan(cache_key=f"planner:{goal[:80]}")
         messages = [
             {"role": "system", "content":
                 "You are the Elysia planner. Turn the goal into a concise "
                 "ordered task list. Return output as plain bullet lines: "
                 "'- <short title>| <detail>'. Do NOT include commentary."},
-            {"role": "user", "content": ctx},
+            {"role": "user", "content": plan["prompt"]},
         ]
         self.events.emit("agent.run", agent_id="planner",
                          status="started")
@@ -280,7 +508,16 @@ class AgentPipeline:
         tasks = parse_plan(text)
         self.events.emit("agent.decision", agent_id="planner",
                          status="ok", detail=f"planned {len(tasks)} sub-tasks")
-        return {"ok": True, "tasks": tasks, "raw": text}
+        try:
+            self.memory.remember_decision(
+                f"plan for: {goal[:200]}",
+                "planner produced: " + "; ".join(
+                    t.get("title", "") for t in tasks[:8]),
+                actor="agent:planner", tags=["plan"])
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": True, "tasks": tasks, "raw": text,
+                "context": plan["report"]}
 
     # -- stage: architect -----------------------------------------------------
     def architect(self, plan: str, task_id=None) -> dict:
