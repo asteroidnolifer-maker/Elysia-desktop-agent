@@ -70,6 +70,15 @@ class ToolResult:
         return cls(ok=True, data=data, preview=preview)
 
     @classmethod
+    def preview_result(cls, preview: str, data=None) -> "ToolResult":
+        """A successful dry run: `dry_run` MUST be True here, otherwise callers
+        that branch on the flag would believe the action really happened."""
+        payload = {"dry_run": True, "preview": preview}
+        if data:
+            payload.update(data)
+        return cls(ok=True, data=payload, preview=preview, dry_run=True)
+
+    @classmethod
     def error_result(cls, message, data=None) -> "ToolResult":
         return cls(ok=False, data=data, error=message)
 
@@ -92,10 +101,15 @@ class ToolRegistry:
         self._policies.append(fn)
 
     def list(self, risk_max: str | None = None) -> list[ToolSpec]:
+        """Registered specs, optionally filtered to ``risk <= risk_max``."""
         specs = [spec for spec, _ in self._tools.values()]
         if risk_max:
-            spec_names = sorted(specs, key=lambda s: RISK_ORDER[s.risk])
+            ceiling = RISK_ORDER.get(risk_max, max(RISK_ORDER.values()))
+            specs = [s for s in specs if RISK_ORDER.get(s.risk, 0) <= ceiling]
         return specs
+
+    def names(self) -> list[str]:
+        return sorted(self._tools.keys())
 
     def get(self, name: str) -> ToolSpec | None:
         spec, _ = self._tools.get(name, (None, None))
@@ -122,9 +136,7 @@ class ToolRegistry:
         if dry_run or (spec.destructive and not spec.dry_run_safe):
             preview = (spec.preview_fn(args) if spec.preview_fn
                        else f"{spec.name} would run with args: {str(args)[:500]}")
-            return ToolResult.ok_result(
-                data={"dry_run": True, "preview": preview},
-                preview=preview).to_dict()
+            return ToolResult.preview_result(preview).to_dict()
         # -- policy callbacks ----------------------------------------------------
         for pol in self._policies:
             reason = pol(spec, args)

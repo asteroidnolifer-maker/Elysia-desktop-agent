@@ -304,5 +304,155 @@ class HuggingFaceTests(unittest.TestCase):
         self.assertIn("error", res)
 
 
+class ProviderHealthCircuitTests(unittest.TestCase):
+    """Provider health: circuit breaker, quarantine, half-open recovery.
+
+    Real Provider objects with scripted outcomes; no network, no model.
+    """
+
+    def _pm(self, label="flaky", concurrency=2, caps=None):
+        from elysia.core.config import ProviderConfig
+        from elysia.core.providers import ProviderManager
+        pm = ProviderManager()
+        p = pm.register(ProviderConfig(
+            kind="openai", label=label, model=f"m-{label}",
+            capabilities=caps or ["chat"], concurrency=concurrency))
+        p.check_health = lambda: "healthy"
+        return pm, p
+
+    def test_consecutive_failures_trip_the_circuit(self):
+        from elysia.core.providers import Provider
+        _, p = self._pm()
+        self.assertEqual(p.circuit_state(), Provider.CLOSED)
+        for i in range(p.FAILURE_THRESHOLD - 1):
+            p.mark_error("HTTP 500 boom")
+            self.assertEqual(p.circuit_state(), Provider.CLOSED, i)
+        p.mark_error("HTTP 500 boom")
+        self.assertEqual(p.circuit_state(), Provider.OPEN)
+        self.assertEqual(p.trips, 1)
+        self.assertGreater(p.cooldown_remaining(), 0)
+        self.assertTrue(p.circuit_blocked())
+
+    def test_open_circuit_is_not_reserved_and_says_why(self):
+        pm, p = self._pm()
+        for _ in range(3):
+            p.mark_error("HTTP 500 boom")
+        self.assertIsNone(pm.reserve(["chat"]), "quarantined provider must not"
+                                                   " be reserved")
+        why = pm.explain(["chat"])
+        self.assertIsNone(why["selected"])
+        reasons = [r["reason"] for r in why["trace"]]
+        self.assertTrue(any("circuit open" in (r or "") for r in reasons), reasons)
+
+    def test_half_open_allows_exactly_one_probe(self):
+        pm, p = self._pm(concurrency=4)
+        for _ in range(3):
+            p.mark_error("HTTP 500 boom")
+        p.opened_at = 0                     # cooldown elapsed
+        first = pm.reserve(["chat"])
+        self.assertIsNotNone(first, "one probe must be allowed")
+        first.release()
+        self.assertIsNone(pm.reserve(["chat"]),
+                          "a second probe must wait for the outcome")
+        p.mark_success()                    # probe succeeded
+        self.assertIsNotNone(pm.reserve(["chat"]))
+        self.assertEqual(p.circuit_state(), "closed")
+
+    def test_failed_probe_re_quarantines_longer(self):
+        pm, p = self._pm(concurrency=4)
+        for _ in range(3):
+            p.mark_error("HTTP 500 boom")
+        first_cooldown = p.open_seconds
+        p.opened_at = 0
+        res = pm.reserve(["chat"])
+        self.assertIsNotNone(res)
+        res.release()
+        p.mark_error("HTTP 500 still broken")   # the probe failed
+        self.assertEqual(p.circuit_state(), "open")
+        self.assertEqual(p.trips, 2)
+        self.assertGreater(p.open_seconds, first_cooldown,
+                           "each trip must quarantine longer")
+        self.assertLessEqual(p.open_seconds, p.OPEN_MAX_S)
+
+    def test_abandoned_probe_ticket_expires(self):
+        pm, p = self._pm(concurrency=4)
+        for _ in range(3):
+            p.mark_error("HTTP 500 boom")
+        p.opened_at = 0
+        res = pm.reserve(["chat"])
+        self.assertIsNotNone(res)
+        res.release()                       # reservation abandoned: no outcome
+        self.assertIsNone(pm.reserve(["chat"]))
+        p._half_open_at = 0                 # the ticket timed out
+        self.assertIsNotNone(pm.reserve(["chat"]),
+                             "a lost ticket must not lock the provider out "
+                             "forever")
+
+    def test_success_rate_is_a_real_window(self):
+        _, p = self._pm()
+        self.assertIsNone(p.success_rate(), "no calls -> no invented rate")
+        p.mark_success()
+        p.mark_error("HTTP 500 boom")
+        self.assertEqual(p.success_rate(), 0.5)
+        for _ in range(30):
+            p.mark_success()
+        self.assertEqual(p.success_rate(), 1.0)
+        self.assertLessEqual(len(p.outcomes), p.OUTCOME_WINDOW)
+
+    def test_incident_timeline_is_bounded_and_described(self):
+        _, p = self._pm()
+        for i in range(40):
+            p.mark_error(f"HTTP 503 incident {i}")
+        self.assertLessEqual(len(p.incidents), p.INCIDENT_HISTORY)
+        hist = p.availability_history()
+        self.assertEqual(hist["circuit"], "open")
+        self.assertEqual(hist["trips"], 1)
+        self.assertEqual(hist["incidents"][-1]["kind"], "provider_http_error")
+        self.assertIn("cooldown_remaining_s", hist)
+        cap = p.capacity()
+        self.assertIn("circuit", cap)
+        self.assertIn("success_rate", cap)
+
+    def test_rate_limit_is_classified_as_such(self):
+        _, p = self._pm()
+        p.mark_error("HTTP 429 too many requests")
+        self.assertEqual(p.status, "rate_limited")
+        self.assertEqual(p.incidents[-1]["kind"], "provider_rate_limit")
+
+    def test_transitions_are_published_once_each(self):
+        from elysia.core.events import EventBus
+        pm, p = self._pm()
+        ev = EventBus()
+        pm.set_events(ev)
+        for _ in range(3):
+            p.mark_error("HTTP 500 boom")
+        p.opened_at = 0
+        res = pm.reserve(["chat"])
+        res.release()
+        p.mark_success()
+        kinds = [e["event_type"] for e in ev.recent(50)]
+        self.assertEqual(kinds.count("provider.quarantined"), 1)
+        self.assertEqual(kinds.count("provider.half_open"), 1)
+        self.assertEqual(kinds.count("provider.recovered"), 1)
+        self.assertIn("provider.quarantined", kinds)
+
+    def test_a_healthy_peer_serves_while_one_is_quarantined(self):
+        from elysia.core.config import ProviderConfig
+        pm, bad = self._pm(label="bad")
+        good = pm.register(ProviderConfig(kind="openai", label="good",
+                                          model="m-good", capabilities=["chat"],
+                                          concurrency=2))
+        good.check_health = lambda: "healthy"
+        for _ in range(3):
+            bad.mark_error("HTTP 500 boom")
+        res = pm.reserve(["chat"])
+        self.assertIsNotNone(res)
+        self.assertEqual(res.provider.name, "good",
+                         "the healthy peer must take over")
+        res.release()
+        self.assertEqual(pm.availability_report()[0]["name"], "bad")
+        self.assertIn("circuit", pm.availability_report()[0])
+
+
 if __name__ == "__main__":
     unittest.main()

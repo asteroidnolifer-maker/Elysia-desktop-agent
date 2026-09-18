@@ -312,6 +312,138 @@ orchestrator (`orchestrator/server.py` docstring):
 - `POST /api/ask {goal, files?}`, `POST /api/pool {action: start|stop, cap?}`, `POST /api/task {title, description, files}`
 - `POST /api/agent {task}` — master control plane: plans, persists the task graph, drives the logical agents and returns the trace; `GET /api/scheduler`, `POST /api/executor {action: status|start|stop}`
 
+## Runtime tool layer, simulation, routing, health
+
+Agents never touch the filesystem directly: owned-file writes go through the
+canonical permissioned tool layer (`elysia/core/toolkit.py`), and a role that
+lacks `workspace:write` fails loudly instead of silently changing files.
+
+```bash
+./bin/elysia tools --registry                  # tools + risk + required permissions
+./bin/elysia tools --registry --role implementer   # allow/deny per role, with reasons
+./bin/elysia master route --caps chat,coding   # why this provider/model was chosen
+./bin/elysia master simulate "<goal>"          # dry run — writes nothing
+./bin/elysia health                            # 10 independent health dimensions
+```
+
+Permission levels are escalating bundles (`read_only`, `workspace_write`,
+`git_write`, `network`, `browser`, `desktop`, `system`) configured under
+`tools.default_permissions` (the ceiling for every role) and
+`tools.role_permissions` (per-role overrides). Reviewers
+(`code_reviewer`, `security_reviewer`, `planner`, ...) are forced read-only.
+Desktop/clipboard control needs both `tools.allow_high_risk: true` and the
+`desktop:control` permission, and reports the backend unavailable on headless
+hosts instead of pretending. Set `tools.enabled: false` to fall back to direct
+path-validated workspace writes.
+
+## Workflows, budgets and board maintenance
+
+Workflows are real node graphs over the durable task board (no second state
+store). Gates are board rows no worker can claim:
+
+```bash
+./bin/elysia workflow start --file nodes.json --name demo   # task/approval/join/
+./bin/elysia workflow tick                                  # fallback/retry/timeout/rollback
+./bin/elysia workflow state demo                            # node table + awaiting approval
+./bin/elysia workflow approve --node 119                    # human gate (deny cascades)
+./bin/elysia db health | backup state/backups | restore FILE | vacuum
+```
+
+Approval gates block downstream work until a human resolves them; a denial
+cancels the branch instead of proceeding. Joins complete only when every
+sibling completed. `providers.set_budget(max_usd, warn_usd)` enforces an
+estimated-spend ceiling: paid providers are dropped (visible in
+`master route`), local models keep serving, and an all-paid fleet queues work
+instead of silently spending.
+
+## Memory, context planning, self-healing, task graphs
+
+Four subsystems sit behind every model call. All four are wired into the live
+pipeline (not side libraries), and none of them fabricates success.
+
+**Layered memory** (`elysia/core/memory.py`) — separate namespaces (task,
+workflow, project, repo, user_prefs, agents, providers, failure, solution,
+decision, architecture, research, tools, history) with per-record
+`importance`, `confidence`, `provenance`, TTL, recall counters and a content
+hash. Identical content is deduplicated instead of duplicated; compaction drops
+expired records and *compresses* the oldest low-value ones into a summary record
+(the keys it replaced are kept, never silently destroyed).
+
+```bash
+./bin/elysia memory stats
+./bin/elysia memory timeline --ns solution
+./bin/elysia memory recall "provider timeout"
+./bin/elysia memory backup state/memory-backup.json
+./bin/elysia memory invalidate --ns decision --key dec_1 --reason superseded
+./bin/elysia memory compact
+```
+
+**Context planner** (`elysia/core/context.py`) — answers "what does this agent
+actually need?" instead of dumping the repository into every prompt. Layers
+(system, task, files, failures, tests, memory, review, provider, capabilities)
+compete for a token budget by per-role priority; a long layer keeps its recent
+*TAIL*; every included/dropped layer is reported with its source and reason,
+and the plan is cached until its inputs change (any `add`/`invalidate`).
+
+**Self-healing** (`elysia/core/healing.py`) — one classifier decides what a
+failure *is* (`provider_timeout`, `provider_rate_limit`, `sqlite_busy`,
+`stale_lease`, `qa_failure`, `test_failure`, `malformed_model_output`, …), what
+to do about it (retry / retry-after-backoff / failover / replan / escalate /
+give up) from real evidence, and how long to wait: the configured
+`retry_backoff_s` is the per-attempt base and the failure class scales it
+exponentially with deterministic jitter. Retries are bounded per class, so no
+code path can build an infinite retry loop. Recovery routines do real work
+(release a stale lease, reclaim disk via memory compaction + DB vacuum,
+re-probe providers) and report honestly when they cannot run. Dangerous
+conditions are never auto-fixed: a git conflict escalates to a human because
+resolving it could destroy someone else's work.
+
+```bash
+./bin/elysia healing policies                     # the whole taxonomy + policy table
+./bin/elysia healing classify "HTTP 429 too many requests"
+./bin/elysia healing report
+```
+
+**Provider health** (`elysia/core/providers.py`) — every provider keeps an
+availability history: consecutive failures, circuit state, trips, cooldown,
+success rate over the last 20 outcomes and a bounded incident timeline. Three
+consecutive failures quarantine it (circuit open, 30s cooldown doubling per
+trip, capped at 900s) and it stops being selected; `master route` then says
+*why* ("circuit open after 1 trip(s)/3 failures, 30s cooldown left") instead of
+a vague "degraded". When the cooldown elapses exactly ONE half-open probe is
+allowed — success closes the circuit, failure re-quarantines for longer — and an
+abandoned probe ticket expires so nothing is locked out forever. Transitions are
+published once each as `provider.quarantined` / `provider.half_open` /
+`provider.recovered`, so a run timeline shows why a provider vanished, and the
+health dimension reports `N quarantined (circuit open)`.
+
+```bash
+./bin/elysia master status     # circuit / trips / success rate per provider
+./bin/elysia master route --caps chat,coding
+./bin/elysia health
+```
+
+**Task-graph intelligence** (`elysia/core/graph.py`) — a plan is checked as a
+GRAPH before anything runs: unknown/self dependencies, cycles, two writers of
+one file, a task that mentions another task's file without depending on it,
+tasks nothing can execute, oversized tasks, trivial tasks, existing-vs-new
+files. `replan()` then applies only the repairs that are safe and mechanical —
+dropping invalid edges, breaking cycles, giving a file one owner, splitting
+oversized tasks — and reports every change. Dependencies are remapped through an
+explicit old→new table, so splitting a task wires its dependents to *every*
+part and merging can never leave a stale index or a cycle. The planner path
+repairs automatically; an explicit plan is never rewritten, and its available
+repairs are shown instead:
+
+```bash
+./bin/elysia master simulate "refactor the utils module"   # plan + analyse + estimate
+./bin/elysia master simulate "plan check" --file plan.json # analyse a plan offline
+```
+
+`simulate` reports the conflicts the RAW planner output had, the repairs the
+master would apply, the repairs available for an explicit plan, and heuristic
+duration/token estimates (labelled as heuristics, never as telemetry).
+
 ## Secrets — do not commit
 
 `.gitignore` already blocks: `.env` / `*.env` / `*.key` / `*.pem` / `*token*` / `*secret*`,

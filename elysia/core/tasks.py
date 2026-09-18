@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import time
 import uuid
@@ -69,6 +70,24 @@ CREATE INDEX IF NOT EXISTS idx_tasks_deps ON tasks(dependencies);
 CREATE INDEX IF NOT EXISTS idx_tasks_dedup ON tasks(dedup_hash);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority) WHERE status='ready';
 """
+
+#: Bump when the schema changes; _init() migrates existing boards forward.
+SCHEMA_VERSION = 1
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    """Bring an existing database up to SCHEMA_VERSION.
+
+    Uses SQLite's user_version pragma (atomic, no extra table). Each step is
+    idempotent; executescript() has already added any missing columns/indexes
+    for this version. Future migrations append "if v < 2: ..." steps here —
+    never edit history in place.
+    """
+    v = int(con.execute("PRAGMA user_version").fetchone()[0] or 0)
+    if v < SCHEMA_VERSION:
+        # v0 -> v1: CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS in
+        # SCHEMA already covers the delta (an older board just lacks objects).
+        con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 # Lifecycle helpers
 TERMINAL = {"completed", "done", "failed", "cancelled", "dependency_failed"}
@@ -132,9 +151,94 @@ class TaskStore:
         con = self._connect()
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA busy_timeout=30000")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute("PRAGMA synchronous=NORMAL")
         con.executescript(SCHEMA)
+        _migrate(con)
         con.commit()
         con.close()
+
+    # -- health / maintenance (Phase 35) -------------------------------------
+    def health_check(self) -> dict:
+        """Is the board openable, intact and sane? Never raises."""
+        info: dict = {"path": self.db_path, "exists": os.path.exists(self.db_path)}
+        try:
+            con = self._connect()
+            try:
+                info["integrity"] = (con.execute(
+                    "PRAGMA integrity_check").fetchone()[0] or "?").lower()
+                info["schema_version"] = int(
+                    con.execute("PRAGMA user_version").fetchone()[0] or 0)
+                info["journal_mode"] = con.execute(
+                    "PRAGMA journal_mode").fetchone()[0]
+                info["counts"] = self.counts()
+                malformed = 0
+                for row in con.execute("SELECT dependencies FROM tasks"):
+                    try:
+                        val = json.loads(row[0] or "[]")
+                        if not isinstance(val, list):
+                            malformed += 1
+                    except (json.JSONDecodeError, TypeError):
+                        malformed += 1
+                info["malformed_dependency_rows"] = malformed
+            finally:
+                con.close()
+            info["ok"] = info["integrity"] == "ok"
+        except sqlite3.DatabaseError as e:
+            info["ok"] = False
+            info["error"] = str(e)[:200]
+        return info
+
+    def backup(self, dest_dir: str) -> dict:
+        """Consistent online backup via SQLite's backup API (WAL-safe)."""
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, "taskboard-backup.sqlite")
+        src = self._connect()
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        return {"ok": True, "path": dest, "bytes": os.path.getsize(dest)}
+
+    def restore(self, src_path: str) -> dict:
+        """Restore from a backup (DB file only — workspace files are untouched)."""
+        if not os.path.isfile(src_path):
+            return {"ok": False, "error": f"no such backup: {src_path}"}
+        try:
+            chk = sqlite3.connect(src_path)
+            try:
+                ok = (chk.execute("PRAGMA integrity_check").fetchone()[0]
+                      or "").lower() == "ok"
+            finally:
+                chk.close()
+        except sqlite3.DatabaseError as e:
+            return {"ok": False,
+                    "error": f"backup unreadable: {str(e)[:120]}"}
+        if not ok:
+            return {"ok": False, "error": "backup failed integrity check"}
+        for suffix in ("", "-wal", "-shm"):
+            side = self.db_path + suffix
+            if os.path.exists(side):
+                os.remove(side)
+        shutil.copy2(src_path, self.db_path)
+        self._init()
+        return {"ok": True, "restored_from": src_path}
+
+    def vacuum(self) -> dict:
+        """Reclaim space from deleted rows (compaction)."""
+        before = os.path.getsize(self.db_path)
+        con = self._connect()
+        try:
+            con.execute("VACUUM")
+        finally:
+            con.close()
+        after = os.path.getsize(self.db_path)
+        return {"ok": True, "bytes_before": before, "bytes_after": after,
+                "reclaimed": max(0, before - after)}
 
     # -- create -------------------------------------------------------------
     def add_task(self, title, description="", owned_files=None, read_files=None,
@@ -282,6 +386,11 @@ class TaskStore:
                 con.rollback()
                 return False
             if r["backoff_until"] and now < r["backoff_until"]:
+                con.rollback()
+                return False
+            if (r["kind"] or "").startswith("gate:"):
+                # workflow gates are evaluated by the WorkflowEngine, never
+                # claimed/executed by a worker
                 con.rollback()
                 return False
             if r["status"] in ("claimed", "running", "testing", "reviewing",

@@ -19,15 +19,24 @@ files are really written, the diff is really read, the states are really stored.
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 
 from .agents import AgentPipeline
+from .config import Config
 from .events import EventBus
 from .executor import TaskExecutor
+from .graph import analyze as analyze_graph
+from .graph import find_cycles, replan as replan_graph
+from .graph import summary as graph_summary
+from .health import dimensions as health_dimensions
+from .memory import Memory
 from .providers import ProviderManager
 from .scheduler import Scheduler
 from .tasks import TERMINAL, TaskStore
+from .toolkit import build_tools, tool_audit
+from .workspace import Workspace
 
 # Role that owns the file-writing stage of a planned sub-task. The other
 # logical agents (planner/tester/code_reviewer) run inside the pipeline.
@@ -39,10 +48,14 @@ _FILE_RE = re.compile(
 
 
 def extract_owned_files(text: str | None, limit: int = 8) -> list[str]:
-    """Owned-file hints from a plan item (never traversal, never absolute)."""
-    out = [p for p in _FILE_RE.findall(text or "")
-           if ".." not in p and not p.startswith("/")]
-    return list(dict.fromkeys(out))[:limit]
+    """Owned-file hints from a plan item (never traversal, never absolute).
+
+    One canonical implementation lives in ``elysia.core.graph`` so the planner
+    path, the graph analyser and the master all agree on what a file reference
+    is.
+    """
+    from .graph import files_in
+    return files_in(text, limit=limit)
 
 
 # Capabilities each logical role needs. Mirrors the configured
@@ -84,6 +97,35 @@ def role_assignments(providers: ProviderManager, cfg=None) -> list[dict]:
                     "provider": p.name if p else None,
                     "model": p.cfg.model if p else None})
     return out
+
+
+def dependency_cycles(subs: list[dict]) -> list[list[int]]:
+    """Plan items that depend on each other in a cycle (Phase 3, item 91).
+
+    ``subs[i]['after']``/``['dependencies']`` are indices into the same plan.
+    Delegates to the canonical analyser (``elysia.core.graph.find_cycles``).
+    """
+    nodes = [{"index": i,
+              "after": [j for j in (s.get("after") or s.get("dependencies")
+                                    or []) if isinstance(j, int)]}
+             for i, s in enumerate(subs)]
+    return find_cycles(nodes)
+
+
+def _resolve_memory_dir(configured: str | None, workspace_root: str) -> str:
+    """Where this controller's memory lives.
+
+    A RELATIVE configured dir is resolved against the project root (the parent
+    of the workspace), never against the current working directory — otherwise
+    a controller run from elsewhere would silently write into (or read) an
+    unrelated project's memory.
+    """
+    project_root = os.path.dirname(os.path.abspath(workspace_root))
+    if not configured:
+        return os.path.join(project_root, "state", "memory")
+    if os.path.isabs(configured):
+        return configured
+    return os.path.join(project_root, configured)
 
 
 def persist_goal(goal: str, subs: list[dict], store: TaskStore,
@@ -131,20 +173,43 @@ class MasterController:
                  poll_interval_s: float = 0.25,
                  heartbeat_interval_s: float = 10.0,
                  retry_backoff_s: float | None = None,
-                 worker_id: str = "master"):
+                 worker_id: str = "master", tools=None):
         self.store = store
         self.providers = providers
         self.workspace_root = workspace_root
         self.worker_id = worker_id
         self.cfg = cfg
+        self.resources = resources
         self.events = events or EventBus()
+        # Provider circuit transitions (provider.quarantined / half_open /
+        # recovered) belong on the same timeline as everything else.
+        try:
+            self.providers.set_events(self.events)
+        except AttributeError:  # a duck-typed manager without the hook
+            pass
+        # One layered memory per controller (shared with the executor's
+        # pipelines) so failures/solutions/decisions accumulate across tasks.
+        _mem_cfg = getattr(cfg, "memory", None)
+        self.memory = Memory(
+            _resolve_memory_dir(getattr(_mem_cfg, "dir", None), workspace_root),
+            max_entries=int(getattr(_mem_cfg, "max_entries", 20000) or 20000))
+        # The canonical permissioned tool layer the agents write files through.
+        # ``tools.enabled=false`` is the documented escape hatch back to direct
+        # (still path-validated) workspace writes.
+        if tools is not None:
+            self.tools = tools
+        elif getattr(getattr(cfg, "tools", None), "enabled", True):
+            self.tools = build_tools(Workspace(workspace_root), self.events, cfg)
+        else:
+            self.tools = None
         self.scheduler = Scheduler(store, providers, self.events, cfg=cfg,
                                    worker_id=worker_id, resources=resources)
         self.executor = TaskExecutor(
             self.scheduler, workspace_root, max_tasks=max_tasks,
             run_tests=run_tests, poll_interval_s=poll_interval_s,
             heartbeat_interval_s=heartbeat_interval_s,
-            retry_backoff_s=retry_backoff_s)
+            retry_backoff_s=retry_backoff_s, tools=self.tools,
+            memory=self.memory, resources=resources)
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> "MasterController":
@@ -172,13 +237,67 @@ class MasterController:
 
     # -- planning / submission ----------------------------------------------
     def pipeline(self) -> AgentPipeline:
-        from .config import Config
-        return AgentPipeline(self.providers, self.store, events=self.events,
-                             cfg=self.cfg if isinstance(self.cfg, Config) else None)
+        return AgentPipeline(
+            self.providers, self.store, events=self.events,
+            cfg=self.cfg if isinstance(self.cfg, Config) else None,
+            memory=self.memory, resources=self.resources, tools=self.tools)
+
+    def workspace_summary(self) -> str:
+        """What repository are we in, and how is it built (project intel).
+
+        Without this the planner plans blind; with it, plans name real files and
+        the right test command.
+        """
+        try:
+            from .project import ProjectIntel
+            return ProjectIntel(self.workspace_root).to_context()
+        except Exception:  # noqa: BLE001 — intel must never block planning
+            return ""
 
     def plan(self, goal: str, workspace_summary: str = "") -> dict:
-        """Turn a goal into an ordered sub-task list (planner logical agent)."""
-        return self.pipeline().plan_task(goal, workspace_summary)
+        """Turn a goal into an ordered sub-task list (planner logical agent).
+
+        The result is then treated as a GRAPH: dependencies, file ownership and
+        executability are checked, and only the repairs that are safe and
+        mechanical are applied (dropping unknown/cyclic dependencies, giving a
+        file one owner, splitting oversized tasks). Every repair is reported in
+        ``repairs`` — never applied silently.
+        """
+        if not workspace_summary:
+            workspace_summary = self.workspace_summary()
+        res = self.pipeline().plan_task(goal, workspace_summary)
+        if not res.get("ok"):
+            return res
+        caps = role_capabilities(self.cfg)
+        tasks = res.get("tasks") or []
+        analysis = analyze_graph(tasks, root=self.workspace_root,
+                                 providers=self.providers, role_caps=caps)
+        repairs = {"changes": [], "before": len(tasks), "after": len(tasks)}
+        if analysis["issues"]:
+            attempt = replan_graph(tasks, issues=analysis["issues"],
+                                   root=self.workspace_root)
+            if attempt["changes"]:
+                repairs = attempt
+                tasks = attempt["plan"]
+                analysis = analyze_graph(tasks, root=self.workspace_root,
+                                         providers=self.providers, role_caps=caps)
+        res["raw_tasks"] = res.get("tasks") or []
+        res["tasks"] = tasks
+        res["graph"] = analysis
+        res["repairs"] = repairs
+        self.events.emit("goal.planned",
+                         status="ok" if analysis["ok"] else "warn",
+                         detail=graph_summary(analysis))
+        try:
+            self.memory.remember_decision(
+                f"plan graph for: {goal[:160]}",
+                graph_summary(analysis) + (
+                    "; repairs: " + "; ".join(repairs["changes"]) if
+                    repairs["changes"] else ""),
+                actor="master", tags=["plan", "graph"])
+        except Exception:  # noqa: BLE001
+            pass
+        return res
 
     def submit(self, goal: str, subs: list[dict] | None = None,
                start: bool = True) -> dict:
@@ -268,9 +387,161 @@ class MasterController:
                 out.append(role)
         return out
 
+    # -- planning simulation (Phase 61) --------------------------------------
+    def simulate(self, goal: str, subs: list[dict] | None = None,
+                 plan_with_model: bool = True) -> dict:
+        """Dry-run a goal. Writes NOTHING: no workspace files, no board rows,
+        no scheduler start. Answers what *would* happen, who would do it, which
+        provider would answer, whether the roles may write, and what is wrong
+        with the plan (orphan tasks, unservable roles, conflicting ownership,
+        circular dependencies).
+        """
+        goal = (goal or "").strip()
+        if not goal:
+            return {"ok": False, "mode": "simulation", "error": "empty goal"}
+        raw_subs, repairs = None, {"changes": [], "before": 0, "after": 0}
+        if subs is None:
+            if not plan_with_model:
+                return {"ok": False, "mode": "simulation",
+                        "error": "no sub-tasks supplied and model planning disabled"}
+            res = self.plan(goal)
+            if not res.get("ok"):
+                return {"ok": False, "mode": "simulation",
+                        "error": res.get("error") or "planning failed"}
+            raw_subs = res.get("raw_tasks") or []
+            repairs = res.get("repairs") or repairs
+            subs = res.get("tasks") or []
+        if not subs:
+            return {"ok": False, "mode": "simulation",
+                    "error": "planner produced no sub-tasks"}
+        caps_by_role = role_capabilities(self.cfg)
+        # One canonical analyser decides ownership conflicts, cycles, oversized
+        # and unservable tasks (elysia.core.graph) — no second opinion here.
+        analysis = analyze_graph(subs, root=self.workspace_root,
+                                 providers=self.providers,
+                                 role_caps=caps_by_role)
+        graph_issues = {}
+        for issue in analysis["issues"]:
+            for idx in issue["nodes"] or [-1]:
+                graph_issues.setdefault(idx, []).append(issue)
+        nodes = []
+        for i, s in enumerate(subs):
+            detail = s.get("detail") or s.get("title") or ""
+            files = [f for f in (s.get("owned_files")
+                                 or extract_owned_files(detail)) if f]
+            role = s.get("agent_role") or DEFAULT_SUBTASK_ROLE
+            caps = list(caps_by_role.get(role) or ["chat"])
+            routing = self.providers.explain(capabilities=caps)
+            granted = self.tools.grant(role) if self.tools else []
+            can_write = "workspace:write" in granted
+            issues = [{"kind": g["kind"], "blocking": g["severity"] == "blocker",
+                       "severity": g["severity"], "detail": g["detail"],
+                       "fix": g.get("fix", "")}
+                      for g in graph_issues.get(i, [])]
+            if not can_write:
+                issues.append({"kind": "no_write_permission", "blocking": True,
+                               "severity": "blocker",
+                               "detail": f"role '{role}' cannot write files "
+                                         f"(ceiling denies workspace:write)",
+                               "fix": "grant workspace:write to this role"})
+            nodes.append({
+                "index": i, "title": (s.get("title") or goal)[:120],
+                "agent_role": role, "owned_files": files,
+                "required_capabilities": sorted(caps),
+                "provider": routing.get("selected"), "model": routing.get("model"),
+                "routing_reason": routing.get("reason"),
+                "permissions": granted, "can_write": can_write,
+                "after": [j for j in (s.get("after") or s.get("dependencies") or [])
+                          if isinstance(j, int)],
+                "issues": issues})
+        # What the RAW plan (before repair) got wrong is reported too, so a
+        # silent auto-repair can never hide a badly planned goal.
+        raw_analysis = (analyze_graph(raw_subs, root=self.workspace_root,
+                                      providers=self.providers,
+                                      role_caps=caps_by_role)
+                        if raw_subs else analysis)
+
+        def _dedup(issues: list) -> list:
+            seen, out = set(), []
+            for i in issues:
+                key = (i["kind"], i.get("detail"))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(i)
+            return out
+
+        conflicts = _dedup([i for i in raw_analysis["issues"]
+                            if i["kind"] == "duplicate_file_ownership"]
+                           + [i for i in analysis["issues"]
+                              if i["kind"] == "duplicate_file_ownership"])
+        cycles = _dedup(
+            [{"kind": "circular_dependency", "blocking": True,
+              "severity": "blocker", "nodes": i["nodes"], "tasks": i["nodes"],
+              "detail": f"dependency cycle among plan items {i['nodes']}"}
+             for i in raw_analysis["issues"]
+             if i["kind"] == "circular_dependency"]
+            + [{"kind": "circular_dependency", "blocking": True,
+                "severity": "blocker", "nodes": i["nodes"], "tasks": i["nodes"],
+                "detail": f"dependency cycle among plan items {i['nodes']}"}
+               for i in analysis["issues"]
+               if i["kind"] == "circular_dependency"])
+        # ``blocked`` describes what would ACTUALLY run — i.e. the plan after
+        # repair. What the raw planner output got wrong stays visible in
+        # ``conflicts``/``circular_dependencies``/``raw_blockers``.
+        blocked = [{"index": n["index"], **i} for n in nodes for i in n["issues"]
+                   if i["blocking"]]
+        raw_blockers = [i for i in raw_analysis["issues"]
+                        if i["severity"] == "blocker"]
+        return {"ok": not blocked, "mode": "simulation", "goal": goal,
+                "nodes": nodes,
+                "files_that_would_change": sorted(
+                    {f for n in nodes for f in n["owned_files"]}),
+                "conflicts": conflicts, "circular_dependencies": cycles,
+                "blocked": blocked,
+                "issues": analysis["issues"],
+                "raw_issues": raw_analysis["issues"],
+                "raw_blockers": raw_blockers,
+                "repairs": repairs,
+                # For an EXPLICIT plan we never rewrite the caller's graph; we
+                # show what the analyser would repair so it can be applied
+                # deliberately (replan() is the same function the planner path
+                # uses automatically).
+                "suggested_repairs": (
+                    replan_graph(raw_subs, issues=raw_analysis["issues"],
+                                 root=self.workspace_root)["changes"]
+                    if raw_subs else replan_graph(
+                        subs, issues=analysis["issues"],
+                        root=self.workspace_root)["changes"]),
+                "raw_task_count": len(raw_subs or subs),
+                "estimates": analysis["estimates"],
+                "would_create_tasks": len(nodes), "writes": 0,
+                "executor_started": False,
+                "budget": self.scheduler.current_budget(),
+                "providers": self.providers.health_report(),
+                "note": "simulation only — nothing was written to the workspace, "
+                        "the task board or the scheduler"}
+
+    def explain_routing(self, capabilities=None) -> dict:
+        """Why the manager would pick a given provider/model right now."""
+        return self.providers.explain(capabilities=capabilities,
+                                      avoid_models=None)
+
+    def health(self) -> dict:
+        """Independent health dimensions (no aggregate score)."""
+        return health_dimensions(self, tools=self.tools, cfg=self.cfg)
+
+    def tools_report(self) -> list[dict]:
+        """The canonical tool surface with risk + required permissions."""
+        return self.tools.describe() if self.tools else []
+
+    def tool_permissions(self, role: str = "implementer") -> dict:
+        """What one logical role may invoke, and why anything is refused."""
+        if not self.tools:
+            return {"role": role, "granted": [], "allowed": [], "denied": []}
+        return tool_audit(self.tools, role)
+
     def report(self, task_ids: list[int]) -> dict:
         """What actually happened: states, agents, providers, files, checks."""
-        from .workspace import Workspace
         ws = Workspace(self.workspace_root)
         tasks = [self.store.get(t) for t in task_ids]
         tasks = [t for t in tasks if t]
@@ -303,6 +574,9 @@ class MasterController:
             "provider_failures": sum(p.get("failures", 0)
                                      for p in self.providers.health_report()),
             "executor_stats": dict(self.executor.stats),
+            "tools_available": len(self.tools.registry.names()) if self.tools else 0,
+            "file_changes": [e.get("detail") for e in self.events.recent(500)
+                             if e.get("event_type") == "file.changed"],
         }
 
     def agents(self) -> list[dict]:
@@ -322,5 +596,8 @@ class MasterController:
             "executor_stats": dict(self.executor.stats),
             "agents": self.agents(),
             "providers": self.providers.health_report(probe=probe),
+            "provider_availability": self.providers.availability_report(),
             "stages_seen": self.stages(),
+            "health": self.health(),
+            "tools": len(self.tools.registry.names()) if self.tools else 0,
         }

@@ -27,6 +27,19 @@ class ResourceManager:
         # provider capacity model: name -> {model, current_concurrency}
         self._provider_load: dict[str, int] = {}
 
+    @classmethod
+    def from_config(cls, cfg=None) -> "ResourceManager":
+        """Build from a Config (or a ResourcesConfig) — one place that knows how
+        config maps onto the resource model, so callers never pass the config
+        object where an int is expected."""
+        rc = getattr(cfg, "resources", cfg)
+        if rc is None:
+            return cls()
+        return cls(reserve_mb=int(getattr(rc, "reserve_mb", 1536)),
+                   worker_est_mb=int(getattr(rc, "worker_est_mb", 600)),
+                   max_local_workers=int(getattr(rc, "max_local_workers", 4)),
+                   max_cpu_fraction=float(getattr(rc, "max_cpu_fraction", 0.8)))
+
     # -- raw metrics ---------------------------------------------------------
     @staticmethod
     def available_memory_mb() -> int:

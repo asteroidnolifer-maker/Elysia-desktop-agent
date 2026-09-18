@@ -35,13 +35,18 @@ Usage:
     elysia rollback <sha> [--hard]
     elysia since-checkpoint
     elysia skills list|import <path>
-    elysia memory search <query>
+    elysia memory search|recall|timeline|stats|compact|backup|forget|invalidate|correct
+    elysia healing policies | report | classify "<error text>"
     elysia plugins list|load <name>
     elysia audit
     elysia test [--unit|--chaos|--e2e]
     elysia logs [n]
     elysia master run "<goal>" [--no-wait] [--timeout S] [--json]
-    elysia master status | agents
+    elysia master status | agents | simulate "<goal>" | route [--caps chat,coding]
+    elysia health [--json]
+    elysia tools [--registry [--role ROLE] | --check NAME | --missing]
+    elysia db health | backup [DIR] | restore FILE | vacuum
+    elysia workflow start --file nodes.json | tick | state NAME | approve|deny --node ID
 """
 from __future__ import annotations
 
@@ -57,6 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from elysia.core.config import (Config, default_config, load_config, to_dict,
                                 validate)
 from elysia.core.doctor import do_doctor, print_doctor
+from elysia.core.tasks import TaskStore
 
 
 def _root() -> str:
@@ -351,8 +357,57 @@ def cmd_brief(args):
 
 
 # -- tools (machine capability catalog) ------------------------------------------
+def cmd_health(args):
+    """Independent health dimensions — never one misleading aggregate score."""
+    from elysia.core.health import dimensions, failing
+    mc = _master_controller()
+    rep = dimensions(mc, tools=getattr(mc, "tools", None), cfg=getattr(mc, "cfg", None))
+    if args.json:
+        print(json.dumps(rep, indent=1, default=str))
+        return 0
+    marks = {"ok": "ok  ", "warn": "warn", "fail": "FAIL", "unknown": "?   "}
+    for name, dim in rep.items():
+        if not isinstance(dim, dict) or "status" not in dim:
+            continue
+        print(f"[{marks.get(dim['status'], '?   ')}] {name:<13} {dim['detail']}")
+    verdicts = rep["summary"]["verdicts"]
+    print(f"dimensions: {verdicts['ok']} ok, {verdicts['warn']} warn, "
+          f"{verdicts['fail']} fail, {verdicts['unknown']} unknown")
+    return 1 if failing(rep) else 0
+
+
 def cmd_tools(args):
     from elysia.core import toolcatalog as tc
+    if getattr(args, "registry", False):
+        from elysia.core.toolkit import build_tools, tool_audit
+        from elysia.core.workspace import Workspace
+        cfg = load_config()
+        layer = build_tools(Workspace(cfg.workspace.root), cfg=cfg)
+        role = getattr(args, "role", None)
+        if role:
+            audit = tool_audit(layer, role)
+            if args.json:
+                print(json.dumps(audit, indent=1, default=str))
+                return 0
+            print(f"role {role}: granted={', '.join(audit['granted']) or '-'}")
+            for row in audit["rows"]:
+                print(f"  [{'allow' if row['allowed'] else 'deny '}] "
+                      f"{row['tool']:<20} {row['risk']:<9} {row['reason']}")
+            return 0
+        rows = layer.describe()
+        if args.json:
+            print(json.dumps({"tools": rows, "roles": layer.roles_report()},
+                             indent=1, default=str))
+            return 0
+        print(f"runtime tool registry: {len(rows)} tool(s)")
+        for r in rows:
+            print(f"  {r['name']:<20} {r['risk']:<9} "
+                  f"{','.join(r['permissions'])}")
+        print("roles (write = may modify files):")
+        for r in layer.roles_report():
+            print(f"  {r['role']:<20} write={'yes' if r['can_write'] else 'no ':<3} "
+                  f"{len(r['tools'])} tool(s)")
+        return 0
     if getattr(args, "check", None):
         r = tc.detect(args.check)
         state = "INSTALLED" if r["installed"] else "not installed"
@@ -453,7 +508,7 @@ def cmd_cost(_args):
 
 def cmd_resources(_args):
     from elysia.core.resources import ResourceManager
-    rm = ResourceManager()
+    rm = ResourceManager.from_config(load_config())
     print(json.dumps(rm.report(), indent=1))
     return 0
 
@@ -503,11 +558,87 @@ def _master_controller():
         pm.register_many(cfg.providers)
     store = TaskStore(os.path.join(_root(), "orchestrator", "taskboard.sqlite"))
     return MasterController(store, pm, cfg.workspace.root, cfg=cfg,
-                            resources=ResourceManager(), max_tasks=2)
+                            resources=ResourceManager.from_config(cfg),
+                            max_tasks=2)
 
 
 def cmd_master(args):
     mc = _master_controller()
+    if args.action == "simulate":
+        goal = (args.goal or "").strip()
+        subs = None
+        if getattr(args, "file", None):
+            # analyse an explicit plan (offline: no model call needed)
+            try:
+                with open(args.file, encoding="utf-8") as f:
+                    subs = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"cannot read plan file: {e}")
+                return 1
+            if not isinstance(subs, list):
+                print("plan file must be a JSON list of task objects")
+                return 1
+            goal = goal or f"plan from {args.file}"
+        if len(goal) < 3:
+            print('usage: elysia master simulate "<goal>" [--file plan.json]')
+            return 1
+        sim = mc.simulate(goal, subs=subs,
+                          plan_with_model=subs is None)
+        if args.json:
+            print(json.dumps(sim, indent=1, default=str))
+            return 0 if sim.get("ok") else 1
+        print(f"simulation of goal (nothing written): {goal[:120]}")
+        if not sim.get("ok") and sim.get("error"):
+            print(f"  {sim['error']}")
+            return 1
+        for n in sim["nodes"]:
+            target = (f"{n['provider']} ({n['model']})" if n["provider"]
+                      else "-- no provider --")
+            print(f"  [{n['index']}] {n['agent_role']:<12} "
+                  f"files={','.join(n['owned_files']) or '-'} -> {target}")
+            print(f"       write={'yes' if n['can_write'] else 'NO'} | "
+                  f"{n['routing_reason']}")
+            for issue in n["issues"]:
+                print(f"       ! {issue['kind']}: {issue['detail']}")
+        for c in sim["conflicts"]:
+            print(f"  ! file conflict: {c['file']} owned by tasks {c['tasks']}")
+        for c in sim["circular_dependencies"]:
+            print(f"  ! circular dependency: {c}")
+        if sim.get("repairs", {}).get("changes"):
+            print("  graph repairs the master would apply:")
+            for c in sim["repairs"]["changes"]:
+                print(f"    * {c}")
+        if sim.get("suggested_repairs"):
+            print("  repairs available (not applied to an explicit plan):")
+            for c in sim["suggested_repairs"]:
+                print(f"    - {c}")
+        for i in sim.get("raw_issues") or []:
+            print(f"  ! {i['severity']}: {i['kind']}: {i['detail']}")
+        est = sim.get("estimates") or {}
+        if est:
+            print(f"  estimates (heuristic): ~{est.get('total_duration_s')}s, "
+                  f"~{est.get('total_tokens_est')} tokens across "
+                  f"{len(est.get('per_task') or [])} task(s)")
+        print(f"would create {sim['would_create_tasks']} task(s) "
+              f"(raw plan: {sim.get('raw_task_count')}); writes=0; "
+              f"executor_started={sim['executor_started']}")
+        return 0 if sim.get("ok") else 1
+    if args.action == "route":
+        caps = [c.strip() for c in (args.caps or "chat").split(",") if c.strip()]
+        why = mc.explain_routing(caps)
+        if args.json:
+            print(json.dumps(why, indent=1, default=str))
+            return 0
+        print(f"requirements: {', '.join(why['requirements'])}")
+        print(f"selected    : {why['selected']} ({why['model']})")
+        print(f"why         : {why['reason']}")
+        print(f"priority    : {' -> '.join(why['priority_order'])}")
+        for row in why["trace"]:
+            mark = "*" if row.get("selected") else " "
+            print(f" {mark} {row['provider']:<16} {row['status']:<12} "
+                  f"{row['requirement_pass']:<14} "
+                  f"{row['reason'] or 'eligible'}")
+        return 0
     if args.action == "agents":
         rows = mc.agents()
         if args.json:
@@ -533,9 +664,16 @@ def cmd_master(args):
         print("stages seen   :", ", ".join(st["stages_seen"]) or "-")
         print("providers     :")
         for p in st["providers"]:
+            extra = ""
+            if p.get("circuit") and p["circuit"] != "closed":
+                extra = (f"  circuit={p['circuit']} "
+                         f"({p.get('trips', 0)} trip(s), "
+                         f"{p.get('cooldown_remaining_s', 0)}s left)")
+            elif p.get("success_rate") is not None:
+                extra = f"  success={p['success_rate']}"
             print(f"  {p['name']:<14} {p['status']:<12} "
                   f"{p['current_concurrency']}/{p['max_concurrency']} slots, "
-                  f"{p['requests']} req, {p['failures']} fail")
+                  f"{p['requests']} req, {p['failures']} fail{extra}")
         return 0
     goal = (args.goal or "").strip()
     if len(goal) < 3:
@@ -551,6 +689,8 @@ def cmd_master(args):
     rep = run.get("report") or {}
     print(f"goal #{run['goal_task']}: {goal[:120]}")
     print(f"sub-tasks: {len(run['subtasks'])} persisted on the board")
+    for c in (run.get("repairs") or {}).get("changes", []):
+        print(f"  graph repair: {c}")
     for t in rep.get("tasks") or []:
         files = ", ".join(t["files_written"]) or "-"
         print(f"  #{t['id']} [{t['status']}] {t['agent_role'] or 'agent'}: "
@@ -559,6 +699,8 @@ def cmd_master(args):
             print(f"      error: {t['error'][:160]}")
     print("logical agents :", " -> ".join(rep.get("stages") or []) or "-")
     print("files changed  :", ", ".join(rep.get("files_changed") or []) or "-")
+    if rep.get("file_changes"):
+        print("file events    :", ", ".join(rep["file_changes"][:8]))
     for p in rep.get("providers") or []:
         print(f"provider {p['name']}: {p['status']}, {p['requests']} req, "
               f"{p['failures']} fail")
@@ -596,6 +738,106 @@ def cmd_research(args):
 def cmd_orx(args):
     args.deep = True
     return cmd_research(args)
+
+
+# -- db maintenance ----------------------------------------------------------------
+def cmd_db(args):
+    """TaskStore maintenance: health, backup, restore, vacuum (Phase 35)."""
+    db = os.path.join(_root(), "orchestrator", "taskboard.sqlite")
+    store = TaskStore(db)
+    if args.action == "health":
+        h = store.health_check()
+        if args.json:
+            print(json.dumps(h, indent=1, default=str))
+            return 0 if h.get("ok") else 1
+        print(f"board      : {h.get('path')}")
+        print(f"exists     : {h.get('exists')}")
+        print(f"integrity  : {h.get('integrity', h.get('error'))}")
+        print(f"schema ver : {h.get('schema_version')}")
+        print(f"journal    : {h.get('journal_mode')}")
+        print(f"malformed  : {h.get('malformed_dependency_rows')} row(s)")
+        print("counts     :", json.dumps(h.get("counts") or {}))
+        return 0 if h.get("ok") else 1
+    if args.action == "backup":
+        out = store.backup(args.path or os.path.join(_root(), "state", "backups"))
+        print(json.dumps(out, indent=1) if args.json else
+              f"backup written: {out['path']} ({out['bytes']} bytes)")
+        return 0 if out.get("ok") else 1
+    if args.action == "restore":
+        out = store.restore(args.path)
+        if args.json:
+            print(json.dumps(out, indent=1))
+        else:
+            print(out.get("error") or f"restored from {out['restored_from']}")
+        return 0 if out.get("ok") else 1
+    if args.action == "vacuum":
+        out = store.vacuum()
+        print(json.dumps(out, indent=1) if args.json else
+              f"vacuum: {out['bytes_before']} -> {out['bytes_after']} bytes "
+              f"(reclaimed {out['reclaimed']})")
+        return 0 if out.get("ok") else 1
+    return 1
+
+
+def cmd_workflow(args):
+    """Workflow engine: start / tick / state / approve / deny (Phase 2)."""
+    from elysia.core.workflow import WorkflowEngine, WorkflowError
+    db = os.path.join(_root(), "orchestrator", "taskboard.sqlite")
+    store = TaskStore(db)
+    eng = WorkflowEngine(store)
+    if args.action == "start":
+        if not args.file:
+            print("usage: elysia workflow start --file nodes.json [--name NAME]")
+            return 1
+        try:
+            with open(args.file, encoding="utf-8") as f:
+                nodes = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"cannot read nodes: {e}")
+            return 1
+        try:
+            run = eng.start(args.wf_name or args.name
+                            or os.path.basename(args.file).rsplit(".", 1)[0],
+                            nodes)
+        except WorkflowError as e:
+            print(f"invalid workflow: {e}")
+            return 1
+        eng.tick()
+        print(json.dumps(run, indent=1) if args.json else
+              f"workflow '{run['name']}' started: {run['total']} node(s) "
+              f"ids={run['node_ids']}")
+        return 0
+    if args.action == "tick":
+        out = eng.tick()
+        if args.json:
+            print(json.dumps(out, indent=1, default=str))
+        else:
+            rows = out["advanced"]
+            print(f"{len(rows)} gate(s) advanced")
+            for r in rows:
+                print(f"  #{r['node']} [{r['kind']}] {r['state']}: {r['detail']}")
+        return 0
+    if args.action == "state":
+        st = eng.run_state(args.name)
+        if args.json:
+            print(json.dumps(st, indent=1, default=str))
+            return 0
+        print(f"workflow '{st['name']}': {st['completed']}/{st['total']} done, "
+              f"{st['failed']} failed, finished={st['finished']}")
+        if st["awaiting_approval"]:
+            print(f"awaiting approval: {st['awaiting_approval']}")
+        for n in st["nodes"]:
+            print(f"  #{n['id']:<4} [{n['type']:<9}] {n['status']:<12} "
+                  f"{n['title'][:48]}")
+        return 0 if st["ok"] else (1 if st["finished"] else 0)
+    if args.action in ("approve", "deny"):
+        ok = eng.resolve_approval(args.node, allow=args.action == "approve",
+                                  by="operator", note=args.note or "")
+        eng.tick()
+        print(f"{args.action}d node {args.node}" if ok else
+              f"node {args.node} is not an approval gate")
+        return 0 if ok else 1
+    return 1
 
 
 # -- templates ------------------------------------------------------------------
@@ -664,14 +906,127 @@ def cmd_skills(args):
 
 
 # -- memory / plugins ---------------------------------------------------------------
+MEMORY_ACTIONS = {"search", "recall", "timeline", "stats", "compact",
+                  "backup", "forget", "invalidate", "correct"}
+
+
 def cmd_memory(args):
+    """Layered memory: keyword search plus the maintenance operations.
+
+    ``elysia memory <query>`` and ``elysia memory search <query>`` both search
+    (the historical form keeps working); the other verbs are explicit.
+    """
     from elysia.core.memory import Memory
+
+    raw = getattr(args, "command", None)
+    action = raw if raw in MEMORY_ACTIONS else "search"
+    query = getattr(args, "query", None)
+    if raw and raw not in MEMORY_ACTIONS:
+        query = raw
     m = Memory(os.path.join(_root(), "state", "memory"))
-    hits = m.search(args.query, limit=10)
-    for h in hits:
-        print(f"[{h['namespace']}] {h['key']}  (score {h['score']})")
-        print(f"    {json.dumps(h['value'], default=str)[:200]}")
-    return 0
+    ns = getattr(args, "ns", None)
+    as_json = bool(getattr(args, "json", False))
+
+    if action in ("search", "recall"):
+        if not query:
+            print("usage: elysia memory <query> | elysia memory timeline [--ns NS]")
+            return 1
+        hits = (m.recall(query, limit=10) if action == "recall"
+                else m.search(query, limit=10))
+        if as_json:
+            print(json.dumps(hits, indent=2, default=str))
+            return 0
+        if not hits:
+            print("no memories matched")
+            return 0
+        for h in hits:
+            print(f"[{h['namespace']}] {h['key']}  (score {h['score']}) "
+                  f"conf={h.get('confidence')} src={h.get('provenance')}")
+            print(f"    why: {h.get('why')}")
+            print(f"    {json.dumps(h['value'], default=str)[:200]}")
+        return 0
+    if action == "timeline":
+        rows = m.timeline(ns=ns, limit=30)
+        if as_json:
+            print(json.dumps(rows, indent=2, default=str))
+            return 0
+        for r in rows:
+            flag = "INVALID " if r.get("invalidated") else ""
+            print(f"{flag}[{r['namespace']}] {r['key']} kind={r.get('kind')} "
+                  f"imp={r.get('importance')} src={r.get('provenance')}")
+        return 0
+    if action == "stats":
+        print(json.dumps(m.stats(), indent=2))
+        return 0
+    if action == "compact":
+        print(json.dumps(m.compact(), indent=2, default=str))
+        return 0
+    if action == "backup":
+        path = getattr(args, "path", None) or os.path.join(
+            _root(), "state", "memory-backup.json")
+        out = m.backup(path)
+        print(json.dumps(out, indent=2))
+        return 0 if out.get("ok") else 1
+    if action in ("forget", "invalidate", "correct"):
+        key = getattr(args, "key", None)
+        if not key or not ns:
+            print(f"usage: elysia memory {action} --ns NS --key KEY "
+                  f"[--value TEXT] [--reason WHY]")
+            return 1
+        if action == "forget":
+            ok = m.forget(ns, key)
+        elif action == "invalidate":
+            ok = m.invalidate(ns, key, getattr(args, "reason", "") or "")
+        else:
+            value = getattr(args, "value", None)
+            if value is None:
+                print("usage: elysia memory correct --ns NS --key KEY --value TEXT")
+                return 1
+            ok = m.correct(ns, key, value,
+                           getattr(args, "reason", "") or "")
+        print(f"{action} {ns}/{key}: {'ok' if ok else 'not found'}")
+        return 0 if ok else 1
+    return 1
+
+
+def cmd_healing(args):
+    """Failure classification + recovery policy (diagnostics, no model call)."""
+    from elysia.core.healing import Healer, classify, describe_policies
+
+    action = args.action
+    if action == "policies":
+        rows = describe_policies()
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        print(f"{'kind':26} {'retryable':9} {'action':11} {'base':>6}  recovery")
+        for r in rows:
+            print(f"{r['kind']:26} {str(r['retryable']):9} {r['action']:11} "
+                  f"{r['base_backoff_s']:6}  {r['recovery'] or '-'}")
+        return 0
+    if action == "report":
+        print(json.dumps(Healer().report(), indent=2))
+        return 0
+    if action == "classify":
+        text = args.message or ""
+        if not text:
+            print('usage: elysia healing classify "<error text>"')
+            return 1
+        out = classify(text, attempt=int(args.attempt or 1))
+        if args.json:
+            print(json.dumps(out, indent=2, default=str))
+            return 0
+        print(f"kind:       {out['kind']}")
+        print(f"action:     {out['action']}")
+        print(f"retryable:  {out['retryable']} (attempt {out['attempt']}/"
+              f"{out['max_retries']})")
+        print(f"backoff:    {out['backoff_s']}s")
+        print(f"recovery:   {out['recovery'] or 'none'}")
+        print(f"evidence:   {', '.join(out['evidence']) or 'none'}")
+        if out.get("hint"):
+            print(f"hint:       {out['hint']}")
+        return 0
+    return 1
 
 
 def cmd_plugins(args):
@@ -823,6 +1178,11 @@ def build_parser() -> argparse.ArgumentParser:
     kn.add_argument("action", choices=["list", "search", "show"])
     kn.add_argument("query", nargs="?", default=None)
 
+    hp = sub.add_parser("health", help="independent health dimensions "
+                                       "(providers, scheduler, store, workspace, "
+                                       "resources, security, tests, git, memory)")
+    hp.add_argument("--json", action="store_true")
+
     tl = sub.add_parser("tools", help="machine tool catalog: what is installed "
                                       "and what it can do")
     tl.add_argument("--group", default=None,
@@ -831,6 +1191,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="probe one tool and show its knowledge doc")
     tl.add_argument("--missing", action="store_true",
                     help="list catalog tools NOT installed (gap report)")
+    tl.add_argument("--registry", action="store_true",
+                    help="show the runtime tool registry (permissions + risk), "
+                         "not the machine catalog")
+    tl.add_argument("--role", default=None,
+                    help="with --registry: what this role may and may not invoke")
+    tl.add_argument("--json", action="store_true")
 
     br = sub.add_parser("brief", help="Jarvis-style status briefing "
                                       "(capabilities, board, providers)")
@@ -852,8 +1218,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     mc = sub.add_parser("master", help="master control plane: drive a goal "
                                        "through the agent pipeline")
-    mc.add_argument("action", choices=["run", "status", "agents"])
+    mc.add_argument("action", choices=["run", "status", "agents", "simulate",
+                                       "route"])
     mc.add_argument("goal", nargs="?", default=None)
+    mc.add_argument("--file", default=None,
+                    help="simulate: analyse an explicit plan (JSON task list) "
+                         "without calling a model")
+    mc.add_argument("--caps", default=None,
+                    help="route: comma-separated capabilities, e.g. chat,coding")
     mc.add_argument("--timeout", type=float, default=180.0,
                     help="seconds to drive the workflow before reporting")
     mc.add_argument("--no-wait", action="store_true",
@@ -892,9 +1264,48 @@ def build_parser() -> argparse.ArgumentParser:
     sk.add_argument("command", choices=["list", "import", "allow"])
     sk.add_argument("path", nargs="?")
 
-    mem = sub.add_parser("memory")
-    mem.add_argument("search", nargs="?")
+    mem = sub.add_parser("memory", help="layered memory: search, recall, "
+                                         "timeline, stats, compact, backup, "
+                                         "forget, invalidate, correct")
+    mem.add_argument("command", nargs="?", default="search",
+                     help="search (default) | recall | timeline | stats | "
+                          "compact | backup | forget | invalidate | correct")
     mem.add_argument("query", nargs="?")
+    mem.add_argument("--ns", default=None, help="namespace")
+    mem.add_argument("--key", default=None)
+    mem.add_argument("--value", default=None)
+    mem.add_argument("--reason", default="")
+    mem.add_argument("--path", default=None, help="backup destination")
+    mem.add_argument("--json", action="store_true")
+
+    heal = sub.add_parser("healing", help="failure classification and recovery "
+                                           "policy (diagnostics)")
+    heal.add_argument("action",
+                      choices=["policies", "report", "classify"])
+    heal.add_argument("message", nargs="?", default=None,
+                      help="classify: the error text to classify")
+    heal.add_argument("--attempt", type=int, default=1)
+    heal.add_argument("--json", action="store_true")
+
+    dbp = sub.add_parser("db", help="task board maintenance: health, backup, "
+                                    "restore, vacuum")
+    dbp.add_argument("action", choices=["health", "backup", "restore", "vacuum"])
+    dbp.add_argument("path", nargs="?", default=None,
+                     help="backup: destination dir; restore: source file")
+    dbp.add_argument("--json", action="store_true")
+
+    wf = sub.add_parser("workflow", help="workflow engine: start (from a JSON "
+                                         "node list), tick, state, approve, deny")
+    wf.add_argument("action", choices=["start", "tick", "state", "approve", "deny"])
+    wf.add_argument("name", nargs="?", default=None,
+                    help="state: workflow name; start: optional name")
+    wf.add_argument("--name", dest="wf_name", default=None,
+                    help="start: optional workflow name")
+    wf.add_argument("--file", default=None, help="workflow nodes JSON")
+    wf.add_argument("--node", type=int, default=None,
+                    help="approval node id (approve/deny)")
+    wf.add_argument("--note", default="")
+    wf.add_argument("--json", action="store_true")
 
     pl = sub.add_parser("plugins")
     pl.add_argument("command", choices=["list", "load"])
@@ -921,6 +1332,7 @@ def main(argv=None) -> int:
         "workers": cmd_workers, "providers": cmd_providers,
         "login": cmd_login, "hf": cmd_hf, "knowledge": cmd_knowledge,
         "prompt": cmd_prompt, "tools": cmd_tools, "brief": cmd_brief,
+        "health": cmd_health,
         "jarvis": cmd_jarvis,
         "cost": cmd_cost, "resources": cmd_resources, "agents": cmd_agents,
         "master": cmd_master,
@@ -929,6 +1341,7 @@ def main(argv=None) -> int:
         "rollback": cmd_rollback, "since-checkpoint": cmd_since,
         "skills": cmd_skills, "memory": cmd_memory, "plugins": cmd_plugins,
         "audit": cmd_audit, "test": cmd_test, "logs": cmd_logs,
+        "db": cmd_db, "workflow": cmd_workflow, "healing": cmd_healing,
     }
     return handlers[cmd](args)
 
