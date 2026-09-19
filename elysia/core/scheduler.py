@@ -81,6 +81,8 @@ class Scheduler:
             self.heartbeat_grace_s = getattr(sc, "heartbeat_grace_s", 60)
             self.reserve_mb = getattr(sc, "resource_reserve_mb", 1536)
             self.worker_est_mb = getattr(sc, "worker_est_mb", 600)
+            self.max_background_tasks = getattr(sc, "max_background_tasks", 1)
+            self.allow_background = bool(getattr(sc, "allow_background", True))
         else:
             self.max_concurrency = 4
             self.max_attempts = 3
@@ -88,6 +90,8 @@ class Scheduler:
             self.heartbeat_grace_s = 60
             self.reserve_mb = 1536
             self.worker_est_mb = 600
+            self.max_background_tasks = 1
+            self.allow_background = True
         self.workers = WorkerRegistry(self.heartbeat_grace_s * 3)
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -159,16 +163,37 @@ class Scheduler:
             self.events.emit("worker.crashed", agent_id=w, status="expired")
 
     # -- dispatch -------------------------------------------------------------
-    def dispatch_once(self, capabilities=None, max_tasks: int = 4) -> list[dict]:
+    def _active_background(self) -> int:
+        """Background-class tasks currently held by any worker."""
+        holders = ("claimed", "running", "testing", "reviewing")
+        return sum(1 for t in self.store.list(limit=2000)
+                   if t.get("status") in holders
+                   and (t.get("priority_class") or "normal") == "background")
+
+    def dispatch_once(self, capabilities=None, max_tasks: int = 4,
+                      allow_background: bool | None = None) -> list[dict]:
         """Claim eligible tasks for anonymous worker slots.
 
         Respects resource budget, provider slots, and global concurrency. The
         caller then runs each returned task to completion (see `run_claimed`).
+
+        Scheduling-class rule (autonomy): ``background`` work — self-improvement
+        the agent queued for itself — is only claimed when no interactive/normal
+        work is ready AND fewer than ``max_background_tasks`` background tasks
+        are already in flight. Interactive preemption is therefore structural:
+        the moment real work appears, background work stops being dispatched.
         """
+        if allow_background is None:
+            allow_background = self.allow_background
         claimed = []
-        ready = self.store.ready_tasks(limit=max_tasks * 4)
+        # Enough headroom to skip past background rows when foreground work
+        # exists, without a second query.
+        ready = self.store.ready_tasks(limit=max(max_tasks * 4, 32))
         active = self._active_count()
         budget = self.current_budget()
+        foreground_waiting = any(
+            (t.get("priority_class") or "normal") != "background" for t in ready)
+        bg_inflight = self._active_background()
         for task in ready:
             if len(claimed) >= max_tasks:
                 break
@@ -176,6 +201,25 @@ class Scheduler:
                 break
             if len(claimed) >= budget:
                 break
+            is_background = (task.get("priority_class") or "normal") == "background"
+            if is_background:
+                if not allow_background:
+                    self.events.emit("scheduler", status="background_paused",
+                                     task_id=task["id"],
+                                     detail="background work disabled")
+                    continue
+                if foreground_waiting:
+                    self.events.emit("scheduler", status="background_held",
+                                     task_id=task["id"],
+                                     detail="interactive work is waiting")
+                    continue
+                if bg_inflight >= self.max_background_tasks:
+                    self.events.emit(
+                        "scheduler", status="background_capped",
+                        task_id=task["id"],
+                        detail=f"{bg_inflight}/"
+                               f"{self.max_background_tasks} background slots used")
+                    continue
             tid = task["id"]
             res = self._reserve_provider(task, capabilities)
             if res is None:
@@ -190,9 +234,12 @@ class Scheduler:
                 continue
             with self._reserved_mu:
                 self._reserved[tid] = res   # slot held until finish/cancel
+            if is_background:
+                bg_inflight += 1
             self.events.emit("task.claimed", task_id=tid,
                              agent_id=self.worker_id, provider=provider.name,
-                             model=provider.cfg.model, status="claimed")
+                             model=provider.cfg.model, status="claimed",
+                             priority_class=task.get("priority_class") or "normal")
             claimed.append(self.store.get(tid))
         return claimed
 

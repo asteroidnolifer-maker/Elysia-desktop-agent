@@ -1,0 +1,1 @@
+/data/elysia/runtime/restore-model.sh

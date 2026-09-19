@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     agent_role TEXT,                            -- planner|architect|implementer|...
     status TEXT NOT NULL DEFAULT 'queued',
     priority INTEGER NOT NULL DEFAULT 5,
+    priority_class TEXT NOT NULL DEFAULT 'normal',  -- interactive|normal|background
     dependencies TEXT NOT NULL DEFAULT '[]',    -- JSON list of task ids
     dedup_hash TEXT,
     owned_files TEXT NOT NULL DEFAULT '[]',
@@ -69,10 +70,27 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_deps ON tasks(dependencies);
 CREATE INDEX IF NOT EXISTS idx_tasks_dedup ON tasks(dedup_hash);
 CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority) WHERE status='ready';
+CREATE INDEX IF NOT EXISTS idx_tasks_class ON tasks(priority_class);
 """
 
 #: Bump when the schema changes; _init() migrates existing boards forward.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: Scheduling classes, highest urgency first. ``background`` work is only
+#: claimed when no higher-class work is waiting, so an unattended
+#: self-improvement run can never starve an interactive request.
+PRIORITY_CLASSES = ("interactive", "normal", "background")
+CLASS_RANK = {c: len(PRIORITY_CLASSES) - i for i, c in enumerate(PRIORITY_CLASSES)}
+
+
+def normalise_class(value: str | None) -> str:
+    """Canonical scheduling class (unknown values fall back to ``normal``)."""
+    v = (value or "normal").strip().lower()
+    return v if v in CLASS_RANK else "normal"
+
+
+def _columns(con: sqlite3.Connection, table: str = "tasks") -> set[str]:
+    return {r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def _migrate(con: sqlite3.Connection) -> None:
@@ -80,14 +98,23 @@ def _migrate(con: sqlite3.Connection) -> None:
 
     Uses SQLite's user_version pragma (atomic, no extra table). Each step is
     idempotent; executescript() has already added any missing columns/indexes
-    for this version. Future migrations append "if v < 2: ..." steps here —
+    for this version. Future migrations append "if v < N: ..." steps here —
     never edit history in place.
     """
     v = int(con.execute("PRAGMA user_version").fetchone()[0] or 0)
-    if v < SCHEMA_VERSION:
+    if v < 1:
         # v0 -> v1: CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS in
         # SCHEMA already covers the delta (an older board just lacks objects).
-        con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        pass
+    if v < 2:
+        # v1 -> v2: scheduling class. CREATE TABLE IF NOT EXISTS does NOT add a
+        # column to an existing table, so an older board needs a real ALTER.
+        if "priority_class" not in _columns(con):
+            con.execute("ALTER TABLE tasks ADD COLUMN priority_class TEXT "
+                        "NOT NULL DEFAULT 'normal'")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_class "
+                    "ON tasks(priority_class)")
+    con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 # Lifecycle helpers
 TERMINAL = {"completed", "done", "failed", "cancelled", "dependency_failed"}
@@ -245,17 +272,18 @@ class TaskStore:
                  dependencies=None, priority=5, max_attempts=3, kind="task",
                  workflow=None, agent_role=None, dedup_hash=None,
                  timeout_s=None, correlation_id=None, project_path=None,
-                 status="queued") -> int:
+                 status="queued", priority_class="normal") -> int:
         con = self._connect()
         cur = con.execute(
             "INSERT INTO tasks (title, description, owned_files, read_files, "
-            "dependencies, priority, max_attempts, kind, workflow, agent_role, "
-            "dedup_hash, timeout_s, correlation_id, project_path, status, "
-            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "dependencies, priority, priority_class, max_attempts, kind, "
+            "workflow, agent_role, dedup_hash, timeout_s, correlation_id, "
+            "project_path, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (title, description or title, json.dumps(owned_files or []),
              json.dumps(read_files or []),
              json.dumps([int(d) for d in (dependencies or [])]),
-             int(priority), int(max_attempts), kind or "task", workflow,
+             int(priority), normalise_class(priority_class), int(max_attempts),
+             kind or "task", workflow,
              agent_role, dedup_hash, timeout_s,
              correlation_id or uuid.uuid4().hex[:12],
              project_path,
@@ -647,14 +675,27 @@ class TaskStore:
             counts.setdefault(s, 0)
         return counts
 
-    def ready_tasks(self, limit: int = 50) -> list[dict]:
-        """Ready tasks whose deps are all satisfied, ordered by priority."""
+    def ready_tasks(self, limit: int = 50, classes=None) -> list[dict]:
+        """Ready tasks whose deps are all satisfied, most urgent class first.
+
+        Ordering is scheduling class (interactive > normal > background), then
+        numeric priority, then id — so an unattended background backlog can
+        never be picked ahead of interactive work.
+        ``classes`` optionally restricts the result to those classes.
+        """
         con = self._connect()
-        rows = con.execute(
-            "SELECT * FROM tasks WHERE status='ready' "
-            "AND (backoff_until IS NULL OR backoff_until <= ?) "
-            "ORDER BY priority DESC, id ASC LIMIT ?",
-            (_now(), limit)).fetchall()
+        q = ("SELECT * FROM tasks WHERE status='ready' "
+             "AND (backoff_until IS NULL OR backoff_until <= ?) ")
+        args: list = [_now()]
+        picked = [normalise_class(c) for c in (classes or [])]
+        if picked:
+            q += "AND priority_class IN (%s) " % ",".join("?" for _ in picked)
+            args.extend(picked)
+        q += ("ORDER BY CASE priority_class "
+              "WHEN 'interactive' THEN 3 WHEN 'normal' THEN 2 "
+              "ELSE 1 END DESC, priority DESC, id ASC LIMIT ?")
+        args.append(limit)
+        rows = con.execute(q, args).fetchall()
         con.close()
         out = []
         for r in rows:
@@ -662,6 +703,23 @@ class TaskStore:
             if self._deps_ready(t.get("dependencies") or []):
                 out.append(t)
         return out
+
+    def ready_by_class(self) -> dict:
+        """Counts of dependency-eligible ready work per scheduling class."""
+        counts = {c: 0 for c in PRIORITY_CLASSES}
+        for t in self.ready_tasks(limit=1000):
+            counts[normalise_class(t.get("priority_class"))] += 1
+        return counts
+
+    def has_foreground_work(self) -> bool:
+        """True when interactive/normal work is ready and waiting.
+
+        The scheduler uses this to hold background (self-improvement) work back
+        so it never competes with what the user actually asked for.
+        """
+        for t in self.ready_tasks(limit=50, classes=["interactive", "normal"]):
+            return True
+        return False
 
     def _deps_ready(self, deps: list) -> bool:
         if not deps:

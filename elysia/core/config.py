@@ -48,6 +48,41 @@ class SchedulerConfig:
     timeout_default_s: int = 0          # 0 = no default per-task timeout
     dedup_enabled: bool = True
     retry_backoff_s: float = 30         # wait before a failed task re-claims
+    #: Background (self-improvement) work: how many may run at once, and
+    #: whether the scheduler may dispatch any at all.
+    max_background_tasks: int = 1
+    allow_background: bool = True
+
+
+@dataclass
+class AutonomyConfig:
+    """Bounded unattended operation (``elysia master loop``).
+
+    A session always ends for a stated reason — budget spent, board drained,
+    interrupted — and parks in a resumable state rather than stopping silently.
+    """
+
+    enabled: bool = True
+    #: Wall-clock ceiling for one session (0 = unlimited).
+    max_wall_s: float = 3600.0
+    #: Work ceilings for one session (0 = unlimited).
+    max_tasks: int = 0
+    max_model_calls: int = 0
+    max_tokens: int = 0
+    max_cost_usd: float = 0.0
+    #: Queue the agent's own improvement proposals as background work.
+    self_improvement: bool = True
+    #: Directory (relative to the workspace) for human-readable run journals.
+    journal_dir: str = "reports"
+    #: Idle polling between drains, and how long to wait before giving up on
+    #: an empty board.
+    idle_poll_s: float = 2.0
+    idle_timeout_s: float = 60.0
+    #: Estimated tokens per model call, used ONLY when a provider reports no
+    #: usage at all, so a token ceiling stays enforceable. 0 = no estimate.
+    tokens_per_call: int = 0
+    #: Hard stop: the loop refuses to run when a guardrail is disabled.
+    enforce_guardrails: bool = True
 
 
 @dataclass
@@ -146,6 +181,7 @@ class Config:
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     providers: list = field(default_factory=list)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    autonomy: AutonomyConfig = field(default_factory=AutonomyConfig)
     git: GitConfig = field(default_factory=GitConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -287,16 +323,34 @@ def apply_dict(cfg: Config, data: dict) -> None:
         pairs = (("max_concurrency", "int"), ("max_attempts", "int"),
                  ("lease_seconds", "int"), ("heartbeat_grace_s", "int"),
                  ("resource_reserve_mb", "int"), ("worker_est_mb", "int"),
-                 ("timeout_default_s", "int"), ("dedup_enabled", "bool"))
+                 ("timeout_default_s", "int"), ("dedup_enabled", "bool"),
+                 ("max_background_tasks", "int"), ("allow_background", "bool"))
         for k, typ in pairs:
             if k in s and s[k] is not None:
                 if typ == "int":
                     v = _int(s[k], 0)
-                    if v > 0 or k == "timeout_default_s":
+                    if v > 0 or k in ("timeout_default_s",):
                         setattr(cfg.scheduler, k, v)
+                elif k == "allow_background":
+                    if isinstance(s[k], bool):
+                        cfg.scheduler.allow_background = s[k]
                 else:
                     if isinstance(s[k], bool):
                         cfg.scheduler.dedup_enabled = s[k]
+    if isinstance(data.get("autonomy"), dict):
+        a = data["autonomy"]
+        for k in ("enabled", "self_improvement", "enforce_guardrails"):
+            if isinstance(a.get(k), bool):
+                setattr(cfg.autonomy, k, a[k])
+        for k in ("max_tasks", "max_model_calls", "max_tokens",
+                  "tokens_per_call"):
+            if k in a and a[k] is not None:
+                cfg.autonomy.__setattr__(k, max(0, _int(a[k], 0)))
+        for k in ("max_wall_s", "max_cost_usd", "idle_poll_s", "idle_timeout_s"):
+            if k in a and a[k] is not None:
+                cfg.autonomy.__setattr__(k, max(0.0, _float(a[k], 0.0)))
+        if isinstance(a.get("journal_dir"), str) and a["journal_dir"]:
+            cfg.autonomy.journal_dir = a["journal_dir"]
     if isinstance(data.get("git"), dict):
         g = data["git"]
         if isinstance(g.get("auto_checkpoint"), bool):
