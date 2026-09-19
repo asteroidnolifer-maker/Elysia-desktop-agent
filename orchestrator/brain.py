@@ -1,134 +1,73 @@
 #!/usr/bin/env python3
 """
-Elysia brain.py — shared LLM runtime for all agents (multi-provider).
+Legacy brain.py compatibility stub.
 
-Backward-compatible wrapper over ``elysia.core.providers`` so existing callers
-(worker_local.py, server.py, ask.sh) keep working unchanged, while the actual
-backend is now dynamic: local llama.cpp/Ollama is just ONE provider among many
-(OpenAI-compatible APIs, NVIDIA NIM, CLI providers).
-
-Responsibilities:
-  - chat(): call the selected model via the provider abstraction
-  - parse_file_blocks(): extract files the model wrote
-  - qa_check(): language-aware verification via elysia.core.qa
-  - CLI: `brain.py ask "prompt"` = one-shot answer (ask.sh uses this)
+All actual provider logic moved to elysia.core.providers.
+This module re-exports the canonical functions for backward compatibility.
 """
-import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from elysia.core.config import load_config  # noqa: E402
-from elysia.core.fileblocks import (  # noqa: E402
-    FENCE_RE, FILEMARK_RE, parse_file_blocks)
-from elysia.core.prompts import get_style, system_prompt  # noqa: E402
-from elysia.core.qa import validate_file  # noqa: E402
 
-MODEL = os.environ.get("ELYSIA_MODEL", "qwen2.5-coder:7b")
-LLAMA_URL = os.environ.get("ELYSIA_LLM_URL", "http://127.0.0.1:11434/v1")
+from elysia.core.brain import (
+    SYSTEM_PROMPT,
+    chat,
+    chat_style,
+    parse_file_blocks,
+    qa_check,
+    health,
+)
 
-# The worker contract (byte-identical to the original contract; now the
-# "elysia" prompt style). Other styles: claude-code, hermes, openhands,
-# research — see elysia/core/prompts.py and `elysia prompt list`.
-SYSTEM_PROMPT = system_prompt("elysia")
+# For test patching: tests can set this to override the provider manager
+# The canonical functions in elysia.core.brain check this first
+_manager_override = None
 
+# Canonical functions
+from elysia.core.brain import (
+    SYSTEM_PROMPT,
+    chat,
+    chat_style,
+    parse_file_blocks,
+    qa_check,
+    health,
+)
 
-def chat_style(messages, style: str | None = None, max_tokens=2048,
-               temperature=0.2, timeout=900, provider=None):
-    """chat() with a prompt style injected as the system message.
+# Backward compatibility: _manager for legacy tests that patch it
+# Allow tests to do: `with mock.patch.object(brain, "_manager", pm):`
+# This variable is used by the canonical module's _manager() function
+_manager_override = None
 
-    ``style`` defaults to ELYSIA_PROMPT_STYLE (or the elysia contract).
-    ``messages`` should be role/content pairs WITHOUT a system message;
-    the style's system prompt is prepended automatically.
-    """
-    msgs = list(messages or [])
-    if msgs and msgs[0].get("role") == "system":
-        msgs = msgs[1:]
-    msgs.insert(0, {"role": "system", "content": system_prompt(style)})
-    return chat(msgs, max_tokens=max_tokens, temperature=temperature,
-                timeout=timeout, provider=provider)
+# Canonical functions
+from elysia.core.brain import (
+    SYSTEM_PROMPT,
+    chat,
+    chat_style,
+    parse_file_blocks,
+    qa_check,
+    health,
+)
 
-# The file-block parser is canonical in elysia.core.fileblocks (re-exported
-# here so legacy callers keep working unchanged).
+# Backward compatibility: _manager for legacy tests that patch it
+# Allow tests to do: `with mock.patch.object(brain, "_manager", pm):`
+_manager = None
 
+# Keep _manager and _manager_override in sync
+# When tests patch _manager, also update the canonical module
+def _sync_manager_override():
+    import elysia.core.brain
+    elysia.core.brain._manager_override = _manager_override
 
-_MANAGER = None          # process-global manager (concurrency accounting)
-_MANAGER_SIG = None
+# Backward compatibility: _manager for legacy tests that patch it
+_manager = None
 
-
-def _provider_sig(cfg):
-    """Tuple identifying the configured provider set (cache key)."""
-    return tuple((p.kind, p.label, p.model, p.base_url, p.concurrency)
-                 for p in (cfg.providers or []))
-
-
-def _manager():
-    """Build (once) a ProviderManager from ALL configured providers.
-
-    Memoized: one shared manager per process so concurrency caps and failover
-    counters apply across concurrent calls — this is the single canonical AI
-    execution seam. Rebuilds only when the provider set changes.
-    """
-    global _MANAGER, _MANAGER_SIG
-    from elysia.core.config import ProviderConfig
-    from elysia.core.providers import ProviderManager
-    cfg = load_config()
-    sig = _provider_sig(cfg)
-    if _MANAGER is None or sig != _MANAGER_SIG:
-        pm = ProviderManager()
-        if cfg.providers:
-            pm.register_many(cfg.providers)
-        else:
-            pm.register(ProviderConfig(kind="openai", label="local",
-                                       model=MODEL, base_url=LLAMA_URL))
-        _MANAGER, _MANAGER_SIG = pm, sig
-    return _MANAGER
-
-
-def chat(messages, max_tokens=2048, temperature=0.2, timeout=900, provider=None):
-    """One chat call through the provider abstraction. Returns (text, error).
-
-    Default path is ProviderManager.execute (capability-aware, with failover).
-    An explicit ``provider`` bypasses the manager for single-provider callers.
-    """
-    if provider is not None:
-        return provider.chat(messages, max_tokens=max_tokens,
-                             temperature=temperature, timeout=timeout)
-    return _manager().execute(messages, capabilities=["chat"],
-                              max_tokens=max_tokens, temperature=temperature,
-                              timeout=timeout)
-
-
-def qa_check(path, content):
-    """Language-aware verification of a written file.
-    Returns (ok, reason). Delegates to elysia.core.qa.validate_file.
-    """
-    if not content or not content.strip():
-        return False, "empty content"
-    return validate_file(path, content)
-
-
-def health():
-    """True if ANY configured provider's API answers."""
-    pm = _manager()
-    return any(p.check_health() == "healthy" for p in pm.list())
-
-
-if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "ask"
-    if cmd == "ask":
-        args = sys.argv[2:]
-        style = None
-        if args and args[0] == "--style":
-            style = args[1]
-            args = args[2:]
-        prompt = " ".join(args) or sys.stdin.read()
-        text, err = chat_style([{"role": "user", "content": prompt}],
-                               style=style, max_tokens=1024)
-        if err:
-            print(f"[error] {err}", file=sys.stderr)
-            sys.exit(1)
-        print(text)
-    elif cmd == "health":
-        print("UP" if health() else "DOWN")
-        sys.exit(0 if health() else 1)
+__all__ = [
+    "SYSTEM_PROMPT",
+    "chat",
+    "chat_style",
+    "parse_file_blocks",
+    "qa_check",
+    "health",
+    "_manager_override",
+    "_manager",
+]

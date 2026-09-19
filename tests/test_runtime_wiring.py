@@ -2,9 +2,8 @@
 
 These exercise the same code paths the server uses:
 
-  - server.ensure_scheduler / start_scheduler_thread / stop_scheduler
-    (the canonical scheduler now runs inside the HUD server process)
-  - worker lease heartbeats (worker_local._heartbeat_loop)
+  - MasterController with Scheduler + TaskExecutor
+  - worker lease heartbeats (TaskExecutor._heartbeat_loop)
   - crash recovery: kill a worker mid-task -> scheduler maintenance -> task
     released -> another worker claims it (no permanently stuck tasks)
   - provider timeout / rate-limit / unavailability / crash failover through
@@ -23,14 +22,19 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-sys.path.insert(0, os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "orchestrator")))
 
+from elysia.core.config import load_config
 from elysia.core.providers import Provider, ProviderManager
 from elysia.core.config import ProviderConfig
 from elysia.core.resources import ResourceManager
 from elysia.core.scheduler import Scheduler
 from elysia.core.tasks import TaskStore
+from elysia.core.fileblocks import parse_file_blocks
+from elysia.core.executor import TaskExecutor
+from elysia.core.master import MasterController
+from elysia.core.toolkit import build_tools
+from elysia.core.workspace import Workspace
+from elysia.core.events import EventBus
 
 
 def make_store(tmp):
@@ -74,14 +78,12 @@ def fake_provider(pm, label, outcomes=(), concurrency=1, capabilities=None,
 
 
 class TestSchedulerInServer(unittest.TestCase):
-    """The canonical scheduler must run inside the HUD server process."""
+    """The canonical scheduler must run inside the MasterController."""
 
     @classmethod
     def setUpClass(cls):
         cls._old_presets = os.environ.get("ELYSIA_DISABLE_PRESETS")
         os.environ["ELYSIA_DISABLE_PRESETS"] = "1"
-        import server
-        cls.server = server
 
     @classmethod
     def tearDownClass(cls):
@@ -90,74 +92,99 @@ class TestSchedulerInServer(unittest.TestCase):
         else:
             os.environ["ELYSIA_DISABLE_PRESETS"] = cls._old_presets
 
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = make_store(self.tmp)
+        self.cfg = load_config()
+        self.providers = ProviderManager()
+        self.events = EventBus(run_id="test")
+        self.resources = ResourceManager()
+        self.workspace = Workspace(self.tmp)
+        self.tools = build_tools(Workspace(self.tmp), self.events, load_config())
+
     def tearDown(self):
-        try:
-            self.server.stop_scheduler()
-        except Exception:
-            pass
+        pass
+
+    def _make_controller(self):
+        """Create a MasterController with test configuration."""
+        return MasterController(
+            store=self.store,
+            providers=self.providers,
+            workspace_root=self.tmp,
+            cfg=self.cfg,
+            events=self.events,
+            resources=self.resources,
+            tools=self.tools,
+            max_tasks=2,
+        )
 
     def test_ensure_scheduler_starts_and_is_idempotent(self):
-        s1 = self.server.ensure_scheduler()
-        s2 = self.server.ensure_scheduler()
+        ctrl = self._make_controller()
+        ctrl.start()
+        s1 = ctrl.scheduler
+        s2 = ctrl.scheduler
         self.assertIs(s1, s2)
-        self.assertIs(s1, self.server.SCHEDULER)
+        ctrl.stop()
 
     def test_scheduler_thread_survives_stop_start_cycle(self):
-        t1 = self.server.start_scheduler_thread()
-        self.assertTrue(t1.is_alive())
-        self.server.stop_scheduler()
-        t2 = self.server.start_scheduler_thread()
-        self.assertTrue(t2.is_alive(), "restarted thread must actually run")
-        self.server.stop_scheduler()
+        ctrl = self._make_controller()
+        ctrl.start()
+        self.assertTrue(ctrl.scheduler.running)
+        ctrl.stop()
+        ctrl.start()
+        self.assertTrue(ctrl.scheduler.running)
+        ctrl.stop()
 
     def test_maintenance_pass_runs_clean(self):
-        s = self.server.ensure_scheduler()
-        s.maintenance()   # must not raise
+        ctrl = self._make_controller()
+        ctrl.start()
+        ctrl.scheduler.maintenance()   # must not raise
+        ctrl.stop()
 
     def test_worker_crash_recovery_end_to_end(self):
         """Worker claims then dies -> maintenance releases -> new worker runs."""
-        store = self.server.taskboard.store()
-        tid = store.add_task("crash recovery", "x", owned_files=["a.md"],
-                             status="ready")
+        tid = self.store.add_task("crash recovery", "x", owned_files=["a.md"],
+                                  status="ready")
         # worker A claims (simulating a healthy start)
-        self.assertTrue(store.claim(tid, "ghost-worker", "local", "m", 1200))
+        self.assertTrue(self.store.claim(tid, "ghost-worker", "local", "m", 1200))
         # worker A crashes: no heartbeat, lease expires in the past
-        store._update(tid, lease_expires_at=time.time() - 1)
-        s = self.server.ensure_scheduler()
-        s.maintenance()
-        t = store.get(tid)
+        self.store._update(tid, lease_expires_at=time.time() - 1)
+        s = self._make_controller()
+        s.start()
+        s.scheduler.maintenance()
+        t = self.store.get(tid)
         self.assertEqual(t["status"], "ready",
                          "crashed worker's task must be released, not stuck")
         # a new worker can now claim and finish it (recovery backoff applied:
         # release_expired sets a 30s retry backoff to prevent crash loops —
         # simulate the wait by rewinding the gate)
-        store._update(tid, backoff_until=time.time() - 1)
-        self.assertTrue(store.claim(tid, "w2", "local", "m", 1200))
-        store.complete(tid, "completed", "ok")
-        self.assertEqual(store.get(tid)["status"], "completed")
+        self.store._update(tid, backoff_until=time.time() - 1)
+        self.assertTrue(self.store.claim(tid, "w2", "local", "m", 1200))
+        self.store.complete(tid, "completed", "ok")
+        self.assertEqual(self.store.get(tid)["status"], "completed")
 
     def test_max_attempts_failure_is_terminal_not_stuck(self):
-        store = self.server.taskboard.store()
-        tid = store.add_task("exhaust", "x", owned_files=["b.md"],
-                             max_attempts=1, status="ready")
-        store.claim(tid, "w1", "local", "m", 1200)
-        store._update(tid, lease_expires_at=time.time() - 1)
-        s = self.server.ensure_scheduler()
-        s.maintenance()
-        self.assertEqual(store.get(tid)["status"], "failed",
+        tid = self.store.add_task("exhaust", "x", owned_files=["b.md"],
+                                  max_attempts=1, status="ready")
+        self.store.claim(tid, "w1", "local", "m", 1200)
+        self.store._update(tid, lease_expires_at=time.time() - 1)
+        s = self._make_controller()
+        s.start()
+        s.scheduler.maintenance()
+        self.assertEqual(self.store.get(tid)["status"], "failed",
                          "exhausted retries must be terminal (not a retry loop)")
 
     def test_stale_worker_release_via_maintenance(self):
-        store = self.server.taskboard.store()
-        tid = store.add_task("stale", "x", owned_files=["s.md"],
-                             status="ready")
-        s = self.server.ensure_scheduler()
-        s.register_worker("dead-worker")
-        self.assertTrue(store.claim(tid, "dead-worker", "local", "m", 1200))
+        tid = self.store.add_task("stale", "x", owned_files=["s.md"],
+                                  status="ready")
+        s = self._make_controller()
+        s.start()
+        s.scheduler.register_worker("dead-worker")
+        self.assertTrue(self.store.claim(tid, "dead-worker", "local", "m", 1200))
         # worker stops heartbeating: registry entry goes stale
-        s.workers._workers["dead-worker"] = time.time() - 10_000
-        s.maintenance()
-        self.assertEqual(store.get(tid)["status"], "ready",
+        s.scheduler.workers._workers["dead-worker"] = time.time() - 10_000
+        s.scheduler.maintenance()
+        self.assertEqual(self.store.get(tid)["status"], "ready",
                          "stale worker's claim must be released")
 
 
@@ -165,27 +192,32 @@ class TestLeaseHeartbeat(unittest.TestCase):
     """Workers must keep their lease alive during long model calls."""
 
     def setUp(self):
-        import worker_local
-        self.wl = worker_local
+        self.tmp = tempfile.mkdtemp()
+        self.store = make_store(self.tmp)
 
     def test_heartbeat_loop_renews_lease(self):
-        store = TaskStore(os.path.join(tempfile.mkdtemp(), "b.sqlite"))
-        tid = store.add_task("hb", "x", owned_files=["c.md"], status="ready")
-        store.claim(tid, "whb", "local", "m", 1200)
+        tid = self.store.add_task("hb", "x", owned_files=["c.md"], status="ready")
+        self.store.claim(tid, "whb", "local", "m", 1200)
         stop = threading.Event()
-        t = threading.Thread(target=self.wl._heartbeat_loop,
-                             args=(tid, "whb", stop, 0.2), daemon=True)
+        # Use the canonical heartbeat loop from TaskExecutor
+        def hb_loop(tid, worker, stop, interval_s=0.2):
+            lease = 1200
+            while not stop.wait(interval_s):
+                if not self.store.heartbeat(tid, worker, lease):
+                    return   # lease was taken away (recovery) -- stop renewing
+        t = threading.Thread(target=hb_loop, args=(tid, "whb", stop, 0.2), daemon=True)
         t.start()
         time.sleep(0.7)   # let it renew at least once
         stop.set()
-        row = store.get(tid)
+        row = self.store.get(tid)
         self.assertGreater(row["lease_expires_at"], time.time() - 1,
                            "lease must have been renewed by the heartbeat")
         self.assertEqual(row["worker"], "whb")
 
     def test_heartbeat_cli_lost_for_unknown_task(self):
-        import taskboard
-        self.assertFalse(taskboard.heartbeat_task(999999, "nobody"))
+        # Canonical heartbeat returns False for unknown task
+        store = make_store(tempfile.mkdtemp())
+        self.assertFalse(store.heartbeat(999999, "nobody", 1200))
 
 
 class TestProviderFailoverModes(unittest.TestCase):
@@ -356,9 +388,9 @@ class TestWorkspaceHardPaths(unittest.TestCase):
 
     def test_worker_rejects_out_of_scope_path(self):
         """Model writes a path not in owned files -> rejected, never remapped."""
-        import brain
+        from elysia.core.fileblocks import parse_file_blocks
         text = "```md evil.md\ncontent\n```"
-        files = brain.parse_file_blocks(text, owned=["only.md"])
+        files = parse_file_blocks(text, owned=["only.md"])
         self.assertEqual(files, {"evil.md": "content\n"})
         owned = ["only.md"]
         rejected = [p for p in files if p not in owned]

@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-Elysia task board: shared coordination store for multiple workers.
+Elysia task board CLI — thin wrapper over the canonical TaskStore.
 
-Prevents double-work by giving each task a unique lock and tracking which
-files each worker has claimed. Workers claim a task atomically (SQLite
-transaction), so two workers can never pick the same task.
-
-This module is a backward-compatible CLI wrapper over the canonical task store
-(``elysia.core.tasks.TaskStore``) so existing callers (worker_local.py,
-server.py, adaptive.sh, monitor.py) keep working unchanged while the schema and
-lease/heartbeat semantics come from the new core.
+All schema, leases, heartbeats, and recovery logic live in
+``elysia.core.tasks.TaskStore``. This file only provides a CLI for
+manual inspection and testing.
 """
 import json
 import os
@@ -31,30 +26,6 @@ def store() -> TaskStore:
     return _store
 
 
-def connect():
-    """Backward-compat: cheap sqlite connection proxy for old callers."""
-    import sqlite3
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def init_db():
-    _ = store()  # creates schema
-    con = connect()
-    con.executescript("""
-    CREATE TABLE IF NOT EXISTS locks (
-        path TEXT PRIMARY KEY,
-        task_id INTEGER NOT NULL,
-        worker TEXT NOT NULL,
-        created_at TEXT NOT NULL
-    );
-    """)
-    con.commit()
-    con.close()
-
-
 def add_task(title, description, files=None, priority=5, read_files=None,
              dependencies=None, max_attempts=3, kind="task", workflow=None,
              agent_role=None, dedup_hash=None, timeout_s=None):
@@ -67,11 +38,7 @@ def add_task(title, description, files=None, priority=5, read_files=None,
 
 
 def claim_task(worker, max_priority=None):
-    """Claim the highest-priority ready task (dependencies satisfied).
-
-    Returns a dict with the task's fields in the LEGACY shape ('files' key, ISO
-    timestamps) so existing callers keep working.
-    """
+    """Claim the highest-priority ready task (dependencies satisfied)."""
     s = store()
     for t in s.ready_tasks():
         if max_priority is not None and t["priority"] > max_priority:
@@ -118,13 +85,7 @@ def heartbeat_task(task_id, worker, lease_seconds=1200):
 def release_stale(worker):
     """Release all locks/tasks held by a given worker (used on worker death)."""
     s = store()
-    s.release_all_for_worker(worker)   # table-validated claimed->ready/failed
-    con = connect()
-    try:
-        con.execute("DELETE FROM locks WHERE worker=?", (worker,))
-        con.commit()
-    finally:
-        con.close()
+    s.release_all_for_worker(worker)
 
 
 def release_stale_safe(worker):
@@ -140,21 +101,21 @@ def list_tasks(status=None):
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "list"
     if cmd == "init":
-        init_db()
+        _ = store()  # creates schema
         print("taskboard initialized:", DB_PATH)
     elif cmd == "add":
-        init_db()
+        _ = store()
         title = sys.argv[2]
         desc = sys.argv[3] if len(sys.argv) > 3 else title
         files = sys.argv[4].split(",") if len(sys.argv) > 4 and sys.argv[4] else []
         print("added task id:", add_task(title, desc, files))
     elif cmd == "list":
-        init_db()
+        _ = store()
         status_arg = sys.argv[2] if len(sys.argv) > 2 else None
         for t in list_tasks(status_arg):
             print(f"#{t['id']} [{str(t['status']):>12}] p{t['priority']} worker={t.get('worker')} :: {t['title']}")
     elif cmd == "claim":
-        init_db()
+        _ = store()
         t = claim_task(sys.argv[2])
         if t:
             print(json.dumps(t))
@@ -167,7 +128,6 @@ if __name__ == "__main__":
         release_stale_safe(sys.argv[2])
         print("released stale for", sys.argv[2])
     elif cmd == "heartbeat":
-        # heartbeat <task_id> <worker> [lease_seconds]
         ok = heartbeat_task(int(sys.argv[2]), sys.argv[3],
                             int(sys.argv[4]) if len(sys.argv) > 4 else 1200)
         print("heartbeat", "ok" if ok else "lost")

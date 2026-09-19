@@ -46,7 +46,7 @@ class TestDatabaseHardening(unittest.TestCase):
         h = store.health_check()
         self.assertTrue(h["ok"])
         self.assertEqual(h["integrity"], "ok")
-        self.assertEqual(h["schema_version"], 1)
+        self.assertEqual(h["schema_version"], 2)
         self.assertEqual(h["journal_mode"], "wal")
         self.assertEqual(h["malformed_dependency_rows"], 0)
 
@@ -81,7 +81,7 @@ class TestDatabaseHardening(unittest.TestCase):
 
     def test_new_store_carries_schema_version(self):
         _, store = fresh_store()
-        self.assertEqual(store.health_check()["schema_version"], 1)
+        self.assertEqual(store.health_check()["schema_version"], 2)
 
 
 # ---------------------------------------------------------------------------

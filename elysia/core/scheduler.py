@@ -112,6 +112,10 @@ class Scheduler:
         for t in self._threads:
             t.join(timeout=2)
 
+    @property
+    def running(self) -> bool:
+        return any(t.is_alive() for t in self._threads)
+
     def register_worker(self, worker: str) -> None:
         self.workers.register(worker)
         self.events.emit("worker.registered", agent_id=worker, status="ok")
