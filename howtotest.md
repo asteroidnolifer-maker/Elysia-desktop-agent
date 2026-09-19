@@ -12,18 +12,19 @@ cd Elysia-desktop-agent          # repo root
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all 402 tests pass** — the original 88 plus the new
+Expected: **all 402 tests pass** — the original 88 plus the
 `tests/test_providers_plus.py` bundle (provider presets, config integration,
 prompt styles, browser login store, knowledge base, HuggingFace catalog),
 the `tests/test_runtime_wiring.py` bundle (scheduler-in-server crash recovery,
 worker lease heartbeat, provider failover on timeout/429/unavailable/crash,
 concurrency=1 isolation, resource-queue budget gate, symlink-escape and
-invalid-tool-argument rejection), and the `tests/test_master_control.py`
+invalid-tool-argument rejection), the `tests/test_master_control.py`
 bundle (see §1c), the `tests/test_boot_scripts.py` bundle (install/launch
 script contract; see §7b), the `tests/test_tool_layer.py` bundle (see §1d),
 the `tests/test_db_budget_workflow.py` bundle (DB hardening, budget
 enforcement, workflow gates — see §1e), the `tests/test_memory_context_healing.py`
-bundle (see §1f), the `tests/test_task_graph.py` bundle (see §1g) andthe `tests/test_front_door.py` bundle (see §1i) and the
+bundle (see §1f), the `tests/test_task_graph.py` bundle (see §1g), the
+`tests/test_front_door.py` bundle (see §1i) and the
 `tests/test_resource_execution.py` bundle (see §1j). No key, no network, no model
 required.
 

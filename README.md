@@ -5,13 +5,21 @@ a Python orchestrator pool with HUD/taskboard, and a Kotlin Android app
 (`elysia-android/`). No cloud required for the core loop — the model, agent,
 and workers all run on `127.0.0.1`.
 
+The core rule the runtime enforces: **LOGICAL AGENT ≠ MODEL PROCESS ≠ OS PROCESS
+≠ PROVIDER REQUEST.** Dozens of logical agents (planner, implementer, tester,
+reviewer, …) share ONE loaded local model through a queued single slot, while
+cloud/CLI providers run in parallel, heavy work never overlaps inference on
+small machines, and verification tasks that can be answered by real
+tests/compilers/JSON parsers use zero model calls. Design + measured behavior:
+`RESOURCE_ARCHITECTURE.md`.
+
 ## Repository layout
 
 | Path | What it is |
 |---|---|
 | `agent-core/` | Go daemon (default listen `:8085`). HTTP API + sandbox + thermal/power managers. Build with `go build`. Config: `agent-core/agent_config.json`. |
-| `orchestrator/` | Python control layer (stdlib only). `server.py` HUD + JSON API (default `--port 8087`), `adaptive.sh` worker pool, `worker_local.py` agents, `taskboard.py` (canonical `elysia.core.tasks` store), `brain.py` / `ask.sh` LLM chat (multi-provider), `airllm.py` model launcher, `monitor.py`, `hud.html`. |
-| `elysia/` | Rearchitected core package: `core/master.py` (**master control plane**: goal -> planner -> durable task graph -> scheduler -> executor -> logical agents -> workspace -> QA -> review -> completion, plus `status`/`agents`/`report`), `core/config.py`, `core/paths.py` (secure path resolution), `core/providers.py`, `core/tasks.py`, `core/scheduler.py`, `core/executor.py` (in-process task execution), `core/agents.py` (logical roles), `core/fileblocks.py` (model-output file parser), `core/qa.py`, `core/events.py`, `core/git.py`, `core/workspace.py`, `core/toolcatalog.py` (machine capability detection), `core/briefing.py` (Jarvis-style status fusion + `goal_progress`), `core/jarvis.py` (natural-language front door: environment/progress/briefing/knowledge/research/goal/chat), `core/environment.py` (real repo/remote/gh inspection for the front door), `core/knowledge.py` (multi-domain tooling docs) + more. `elysia/config.json` is the single source of configuration. |
+| `orchestrator/` | Python control layer (stdlib only) — now mostly compatibility wrappers over `elysia/`. `server.py` HUD + JSON API (default `--port 8087`, canonical scheduler + in-process executor + provider health + structured events), `taskboard.py` (CLI over the canonical `elysia.core.tasks` store), `brain.py` / `ask.sh` LLM chat (multi-provider), `airllm.py` (thin wrapper over `elysia.core.modelserver` — no `subprocess` of its own), `monitor.py`, `hud.html`, `adaptive.sh` + `worker_local.py` (deprecated OS worker pool; both compete for the same atomic task claim). |
+| `elysia/` | Rearchitected core package: `core/master.py` (**master control plane**: goal -> planner -> durable task graph -> scheduler -> executor -> logical agents -> workspace -> QA -> review -> completion, plus `status`/`agents`/`report`), `core/config.py`, `core/paths.py` (secure path resolution), `core/providers.py`, `core/tasks.py`, `core/scheduler.py`, `core/executor.py` (in-process task execution), `core/agents.py` (logical roles), `core/fileblocks.py` (model-output file parser), `core/qa.py`, `core/events.py`, `core/git.py`, `core/workspace.py`, `core/toolcatalog.py` (machine capability detection), `core/briefing.py` (Jarvis-style status fusion + `goal_progress`), `core/jarvis.py` (natural-language front door: environment/progress/briefing/knowledge/research/goal/chat), `core/environment.py` (real repo/remote/gh inspection for the front door), `core/knowledge.py` (multi-domain tooling docs), `core/resources.py` (live system monitor + admission ladder + slot ledger + provider scoring), `core/inference.py` (`LocalModelPool` shared local-model queue, `ModelRouter` local-vs-remote, `WarmModelRegistry`, `AnalysisCache`), `core/modelserver.py` (the one owner of the llama-server process) + more. `elysia/config.json` is the single source of configuration. |
 | Provider ecosystem | `core/provider_presets.py` — one catalog: local llama.cpp/Ollama, cloud OpenAI-compatible APIs (OpenRouter, Groq, Together, DeepSeek, Mistral, xAI, NVIDIA NIM, GitHub Models, Cerebras, Gemini, HuggingFace, Freebuff-style gateways) and CLI coding agents (Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw). A preset activates only when its credential env var is set (API) or its binary is on PATH (CLI). `core/browser_login.py` — `elysia login <provider>` opens the provider's console in the desktop browser and stores keys in `config/providers.env` (0600, git-ignored). |
 | `docs/` | `ARCHITECTURE_AUDIT.md` (Phase 1 audit), `ARCHITECTURE.md` (target architecture), `IMPLEMENTATION_STATE.md` (status of the rearchitecture), `RESOURCE_ARCHITECTURE.md` (resource-aware execution: many logical agents, one local model slot, admission ladder, measured low-end behavior), `knowledge/kali-tools/` (vendored defensive-first security-tooling docs, indexed by `elysia.core.knowledge`), `security/SECURITY_TOOLING.md` (tooling policy). |
 | `tests/` | `python3 -m unittest discover -s tests` — 402 unit tests (paths/security, providers, scheduler, QA, redaction, worker write security, features bundle, server API, provider presets/login/knowledge/HF, runtime wiring: crash recovery, lease heartbeat, failover, resource queueing, end-to-end executor: goal→file→QA→completion with failover/retry/dependencies, the master control plane: full agent trace, failover, parallelism, dependency sequencing, restart recovery, cancellation, QA rollback, the front door: environment/progress routing and goal milestones, the install/launch scripts: shim contract, dry-run safety, service spawn→stop lifecycle, and the resource-aware execution layer: 20 logical agents on one local model slot, priority/aging fairness, CPU/RAM admission ladder, heavy-slot exclusivity, warm-model hysteresis, privacy routing, deterministic-first checks, model-server lifecycle). |
@@ -131,13 +139,55 @@ cp /path/to/your-model.gguf runtime/models/
 curl -s http://127.0.0.1:11434/v1/models
 ```
 
-`orchestrator/airllm.py` knows these model paths (`MODELS` dict) and picks one by free RAM:
+`orchestrator/airllm.py` is now a thin wrapper over `elysia.core.modelserver`
+(the one component allowed to start/stop the local model — pid-tracked, so a
+duplicate start is a no-op, never a second model process). It still knows the
+model paths (`MODELS` dict) and picks one by free RAM:
 
 ```bash
-python3 orchestrator/airllm.py status
+python3 orchestrator/airllm.py status     # managed server state + RAM floor
 python3 orchestrator/airllm.py models
 python3 orchestrator/airllm.py start qwen1.5b
 ```
+
+With a model running, `./bin/elysia models` shows the local slot, warm state
+and each provider's resource profile (class, cpu/ram cost, privacy, circuit).
+
+## 3b. Resource-aware execution (the scheduler's rules)
+
+This is what keeps a 2-core/16 GB laptop responsive while agents work:
+
+- **One local slot.** `local_llm_concurrency: 1` — every local inference queues
+  through `LocalModelPool` with priorities + aging, so a long coding agent
+  cannot starve a short interactive question. Context is per-request; the model
+  is shared, the state is not.
+- **Heavy exclusivity.** `heavy_exclusive: true` — a build never runs while the
+  model is generating (one expensive thing at a time). Cloud/CLI providers do
+  NOT consume local slots.
+- **Admission ladder** (all thresholds in `resources.*` of `elysia/config.json`):
+  CPU 50/75/90 % defer CPU-heavy/background/all-heavy work; free RAM < 2 GB
+  blocks new heavy jobs, < 1 GB blocks local inference; swap > 1 GB and thermal
+  limits defer `memory_heavy`/`local_llm`. Unknown metrics are reported as
+  unknown — never assumed healthy.
+- **Saturation overflow.** When local compute is saturated and a healthy remote
+  provider exists, work overflows there (`prefer_remote_when_saturated`) —
+  except `local_only` tasks (privacy is structural; they queue or fail
+  honestly, never leave the machine).
+- **Deterministic first.** Pure-verification tasks run the real test runner /
+  compiler / strict JSON parser with zero model calls; per-task accounting
+  (`./bin/elysia master efficiency`) shows AI calls vs real checks.
+
+Observe it live:
+
+```bash
+./bin/elysia resources          # CPU/RAM/swap/temp + held slots + why work waits
+./bin/elysia resources watch    # 2s refresh
+./bin/elysia queue              # task-centric waiting view (same verdicts)
+./bin/elysia master queue       # from the live controller
+```
+
+Full design, thresholds and measured low-end results:
+`RESOURCE_ARCHITECTURE.md`.
 
 ## 3. Build and configure `agent-core`
 
@@ -249,8 +299,13 @@ login — Elysia never stores those credentials). See `howtotest.md` and
 `docs/security/SECURITY_TOOLING.md`.
 
 Flow: `POST /api/ask {goal}` → local model splits the goal into file-owning subtasks
-(max `MAX_DIVISION = 6`, rules from `orchestrator/INSTRUCTIONS.md`) → rows in
-`orchestrator/taskboard.sqlite` → `worker_local.py` agents claim and complete them → HUD polls `/api/state`.
+(rules from `orchestrator/INSTRUCTIONS.md`) → rows in the canonical task store
+(`orchestrator/taskboard.sqlite`, schema owned by `elysia/core/tasks.py`) →
+the scheduler admits them (priority + aging + resource ladder + provider slot
+reservation) → the in-process `TaskExecutor` runs each through the logical-agent
+pipeline (planner → implementer → tester → reviewer) → HUD polls `/api/state`.
+The legacy `adaptive.sh` OS worker pool still works as a compatibility path and
+competes for the same atomic claim, so a task is never double-executed.
 
 ## 6. Android app
 
@@ -308,9 +363,9 @@ agent-core (`agent-core/server.go` routes):
 
 orchestrator (`orchestrator/server.py` docstring):
 
-- `GET /` (HUD), `GET /api/state`, `GET /api/tasks?status=&n=`, `GET /api/agents`, `GET /api/agent-log?worker=<id>&n=`
-- `POST /api/ask {goal, files?}`, `POST /api/pool {action: start|stop, cap?}`, `POST /api/task {title, description, files}`
-- `POST /api/agent {task}` — master control plane: plans, persists the task graph, drives the logical agents and returns the trace; `GET /api/scheduler`, `POST /api/executor {action: status|start|stop}`
+- `GET /` (HUD), `GET /api/state`, `GET /api/tasks?status=&n=`, `GET /api/agents`, `GET /api/agent-log?worker=<id>&n=`, `GET /api/providers`, `GET /api/events`
+- `POST /api/ask {goal, files?}`, `POST /api/pool {action: start|stop, cap?}`, `POST /api/task {title, description, files}`, `POST /api/task/cancel {id}`
+- `POST /api/agent {task}` — master control plane: plans, persists the task graph, drives the logical agents and returns the trace; `POST /api/chat {message}` — Jarvis front door (environment/progress/knowledge/research/goal/chat routes); `GET /api/scheduler`, `POST /api/executor {action: status|start|stop}`
 
 ## Runtime tool layer, simulation, routing, health
 
@@ -325,6 +380,23 @@ lacks `workspace:write` fails loudly instead of silently changing files.
 ./bin/elysia master simulate "<goal>"          # dry run — writes nothing
 ./bin/elysia health                            # 10 independent health dimensions
 ```
+
+### Resource-aware scheduling (what the scheduler actually enforces)
+
+```bash
+./bin/elysia resources                         # live CPU/RAM/slots + waiting reasons
+./bin/elysia queue                             # same verdicts, task-centric
+./bin/elysia models                            # local slot, warm state, provider profiles
+./bin/elysia master efficiency                 # AI calls vs deterministic checks per task
+```
+
+Every task carries a resource class (`light`→`build`, default estimated) and a
+priority class (`critical→interactive→normal→background→idle` with aging).
+Reservations are made BEFORE a task starts, heavy classes share one slot when
+`resources.heavy_exclusive` is true, and the admission ladder (CPU/RAM/swap/
+thermal thresholds, all in `resources.*` of `elysia/config.json`) defers work
+with an exact reason instead of pretending the machine is idle. `privacy.*`
+makes `local_only` routing structural. See `RESOURCE_ARCHITECTURE.md`.
 
 Permission levels are escalating bundles (`read_only`, `workspace_write`,
 `git_write`, `network`, `browser`, `desktop`, `system`) configured under

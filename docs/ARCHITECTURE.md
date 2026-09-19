@@ -42,16 +42,22 @@ GOAL
 PLANNER ───────────────► REPOSITORY CONTEXT (imports, APIs, tests, build files)
   │
   ▼
-TASK GRAPH (dependencies, priorities, owned files, read files)
+TASK GRAPH (dependencies, priorities, resource classes, owned files, read files)
   │
   ▼
-SCHEDULER ─────────────► RESOURCE MANAGER (RAM/CPU budget)
+SCHEDULER ─────────────► RESOURCE POLICY (live CPU/RAM/swap/thermal admission ladder)
   │                        │
   │                        ▼
-  │                 PROVIDER MANAGER (health, capabilities, rate limits)
+  │                 RESOURCE LEDGER (slot reservations BEFORE start; heavy exclusivity)
+  │                        │
+  │                        ▼
+  │                 PROVIDER MANAGER (health, capabilities, rate limits, budget)
   │                        │
   ▼                        ▼
-AGENT MANAGER ───────► one or more PROVIDER SESSIONS (may be shared)
+MODEL ROUTER ─────────► LOCAL MODEL POOL (ONE shared slot, queued, priorities)
+  │                        │  or remote providers in parallel (privacy-aware)
+  ▼                        ▼
+AGENT MANAGER (logical roles, dozens, in-process) ── deterministic checks first
   │
   ▼
 WORKSPACE MANAGER (secure file ownership, no traversal)
@@ -72,6 +78,14 @@ GIT MANAGER (checkpoint commits, conflict detection, no secrets)
 EVENT BUS ─────────────► HUD (structured state, not process scraping)
 ```
 
+The execution rule: **LOGICAL AGENT ≠ MODEL PROCESS ≠ OS PROCESS ≠ PROVIDER
+REQUEST.** One loaded local model serves every logical agent through a queued
+single slot (`local_llm_concurrency: 1` default); CLI/cloud providers never
+consume local slots; heavy classes (`cpu_heavy`, `memory_heavy`, `local_llm`,
+`build`) share one slot when `heavy_exclusive: true`; saturated local compute
+overflows to healthy remote providers unless the task (or global policy) is
+`local_only`. Full design: `RESOURCE_ARCHITECTURE.md`.
+
 ---
 
 ## Components
@@ -89,7 +103,7 @@ new architecture. Components:
 | Workspace | `elysia/core/workspace.py` | File-ownership enforcement + read/reference access + concurrent-modification detection. |
 | Providers | `elysia/core/providers.py` | Provider registry: OpenAI-compatible, local llama.cpp/Ollama, NIM, CLI (opencode/claude/codex), generic. Capability requirement passes (strict, then documented soft fallback), atomic slot reservation, estimated-spend budget gate, and a full health model: consecutive failures, circuit breaker (closed/open/half-open with doubling capped cooldown), quarantine that excludes a provider from selection, a bounded incident timeline, a last-20-outcomes success rate, and one-shot `provider.quarantined`/`half_open`/`recovered` events. `capacity()`/`availability_report()`/`explain()` expose all of it, never a bare verdict. |
 | Tasks | `elysia/core/tasks.py` | Task schema: id, title, description, status, priority, dependencies, owned files, read files, worker, provider, model, attempts, heartbeats, lease expiry, result, test status. |
-| Scheduler | `elysia/core/scheduler.py` | Dependency-aware scheduling with leases, heartbeats, retries, provider/agent selection. Resource-aware (RAM/CPU). No hard `MAX_DIVISION = 6`. |
+| Scheduler | `elysia/core/scheduler.py` | `dispatch_plan()` — dependency-aware scheduling with leases, heartbeats, retries, provider/agent selection; priority classes (`critical→idle`) with aging and interactive preemption of background work; the live resource admission ladder; `ResourceLedger` slot reservations; provider-slot reservation BEFORE a task starts. No hard `MAX_DIVISION = 6`. |
 | QA | `elysia/core/qa.py` | Language-aware validation: py_compile, gofmt/go vet/go test, tsc/npm test, gradle, shell syntax/shellcheck, strict JSON. |
 | Git | `elysia/core/git.py` | status awareness, dirty detection, conflict detection, checkpoint commits. Never commits secrets/runtime state. |
 | Resources | `elysia/core/resources.py` | Resource-aware execution: live monitor (CPU/RAM/swap/thermal/per-process), `ResourcePolicy` admission ladder (configurable thresholds), `ResourceLedger` slot reservations (heavy/heavy-exclusive/io/network, atomic, exactly-once release), resource classes (`light..local_llm/remote_llm/build`) and priority classes (`critical..idle` with aging). Full design: `RESOURCE_ARCHITECTURE.md`. |

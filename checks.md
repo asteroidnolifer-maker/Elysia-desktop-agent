@@ -59,10 +59,10 @@ gates (approval/join/fallback/timeout/rollback) evaluated on the real board.
 
 ```bash
 python3 -m py_compile orchestrator/server.py elysia/cli.py elysia/core/*.py \
-    tests/test_features.py
+    tests/test_features.py tests/test_resource_execution.py tests/test_front_door.py
 ```
 
-## 3. Health + portability
+## 3. Health + portability + resource views
 
 ```bash
 ./bin/elysia doctor     # workspace, providers, api_port, python_deps, git
@@ -70,10 +70,16 @@ python3 -m py_compile orchestrator/server.py elysia/cli.py elysia/core/*.py \
 ./bin/elysia providers --catalog   # provider catalog: what is active/missing
 ./bin/elysia knowledge list        # vendored security docs indexed
 ./bin/elysia prompt                # prompt styles listed
+./bin/elysia resources             # live CPU/RAM/swap/temp + slots + waiting reasons
+./bin/elysia queue                 # same verdicts, task-centric
+./bin/elysia models                # local slot + warm state + provider profiles
+./bin/elysia master efficiency     # AI calls vs deterministic checks
 ```
 
 Expected: `Result: all checks passed`, `audit passed`, and clean output from
-the three new read-only commands (no tracebacks with zero credentials).
+the read-only commands (no tracebacks with zero credentials). Unknown metrics
+(temperature, per-process CPU on first snapshot) print as unknown — never as
+invented values.
 
 ## 4. Skills (vendor + Elysia-native)
 
@@ -224,6 +230,46 @@ Expected:
 - Static validation rejects empty graphs, duplicate ids, unknown node types,
   unknown `after` refs, forward references (cycles impossible by construction),
   joins that wait on nothing, and fallbacks with no `fallback_of`.
+
+## 12. Resource-aware execution (Phase 19)
+
+`RESOURCE_ARCHITECTURE.md` is the design reference;
+`tests/test_resource_execution.py` is the proof (44 tests). All numbers come
+from real subsystems — real ledger, real policy ladder, real pool threads,
+real scheduler + SQLite board; only the model transport is faked.
+
+```bash
+python3 -m unittest tests.test_resource_execution -v
+./bin/elysia resources          # live system + held slots + waiting reasons
+./bin/elysia queue              # waiting view, task-centric
+./bin/elysia models             # local slots, warm state, batching policy
+./bin/elysia master queue       # running + waiting from the live controller
+```
+
+Expected:
+- 20 logical agents complete through ONE local model slot — peak concurrent
+  local inferences = 1, slot released after every request.
+- The slot survives provider exceptions, cancellation and timeouts (a release
+  that raises is recorded, never propagated).
+- Fairness: interactive outranks background; aging lifts a waiting task; an
+  interactive waiter defers background admission with the exact verdict.
+- CPU ladder: 60% → build deferred; 80% → heavy/background deferred; 95% →
+  local blocked but remote allowed. RAM ladder: 1.5 GB free → no new model;
+  0.8 GB → inference blocked; remote still serves.
+- Heavy exclusivity: model running → build refused ("one heavy job at a time").
+- Warm models: no pressure → no unload; fresh model → keep (hysteresis); no
+  unload command → honest `unsupported`.
+- Privacy: `local_only` stays local while the slot is busy; global
+  `privacy.local_only` locks ALL routing; saturated local overflows to remote
+  only for non-private tasks.
+- Reservations: model task claims its provider slot before starting; a build
+  task takes the build slot, NOT the model slot; finish/cancel releases
+  exactly once.
+- Determinism: verification tasks complete with 0 model calls; the checks
+  really ran.
+- Bypass audits: `airllm.py` contains no `subprocess` (AST-checked);
+  `start_pool` spawns nothing; `worker_local.py` reaches models only through
+  the brain wrapper.
 
 ## 10. Memory, context planning, self-healing, task graphs
 
