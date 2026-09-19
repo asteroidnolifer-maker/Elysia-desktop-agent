@@ -63,7 +63,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     correlation_id TEXT,
     project_path TEXT,
     cost_usd REAL NOT NULL DEFAULT 0,
-    usage_json TEXT NOT NULL DEFAULT '{}'
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    -- resource-aware execution (see resources.py / RESOURCE_ARCHITECTURE.md)
+    resource_class TEXT,                        -- light|io|network|cpu|cpu_heavy|
+                                                -- memory_heavy|local_llm|remote_llm|build
+    priority_class TEXT NOT NULL DEFAULT 'normal',  -- critical|interactive|normal|background|idle
+    privacy TEXT NOT NULL DEFAULT '',            -- ''|local_only
+    deterministic_checks INTEGER NOT NULL DEFAULT 0,
+    retries INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_deps ON tasks(dependencies);
@@ -72,7 +79,28 @@ CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority) WHERE status='r
 """
 
 #: Bump when the schema changes; _init() migrates existing boards forward.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: Columns added after v1. ``_ensure_columns`` applies only the missing ones, so
+#: an existing board is upgraded in place (never recreated, never data loss).
+_ADDED_COLUMNS = {
+    "resource_class": "TEXT",
+    "priority_class": "TEXT NOT NULL DEFAULT 'normal'",
+    "privacy": "TEXT NOT NULL DEFAULT ''",
+    "deterministic_checks": "INTEGER NOT NULL DEFAULT 0",
+    "retries": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+def _ensure_columns(con: sqlite3.Connection) -> list[str]:
+    """Add any missing column (idempotent). Returns the columns added."""
+    have = {r[1] for r in con.execute("PRAGMA table_info(tasks)").fetchall()}
+    added = []
+    for name, decl in _ADDED_COLUMNS.items():
+        if name not in have:
+            con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
+            added.append(name)
+    return added
 
 
 def _migrate(con: sqlite3.Connection) -> None:
@@ -80,13 +108,15 @@ def _migrate(con: sqlite3.Connection) -> None:
 
     Uses SQLite's user_version pragma (atomic, no extra table). Each step is
     idempotent; executescript() has already added any missing columns/indexes
-    for this version. Future migrations append "if v < 2: ..." steps here —
+    for this version. Future migrations append "if v < N: ..." steps here —
     never edit history in place.
     """
     v = int(con.execute("PRAGMA user_version").fetchone()[0] or 0)
     if v < SCHEMA_VERSION:
         # v0 -> v1: CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS in
         # SCHEMA already covers the delta (an older board just lacks objects).
+        # v1 -> v2: resource-aware execution columns (ADD COLUMN only).
+        _ensure_columns(con)
         con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 # Lifecycle helpers
@@ -245,13 +275,15 @@ class TaskStore:
                  dependencies=None, priority=5, max_attempts=3, kind="task",
                  workflow=None, agent_role=None, dedup_hash=None,
                  timeout_s=None, correlation_id=None, project_path=None,
-                 status="queued") -> int:
+                 status="queued", resource_class=None, priority_class=None,
+                 privacy="") -> int:
         con = self._connect()
         cur = con.execute(
             "INSERT INTO tasks (title, description, owned_files, read_files, "
             "dependencies, priority, max_attempts, kind, workflow, agent_role, "
             "dedup_hash, timeout_s, correlation_id, project_path, status, "
-            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at, resource_class, priority_class, privacy) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (title, description or title, json.dumps(owned_files or []),
              json.dumps(read_files or []),
              json.dumps([int(d) for d in (dependencies or [])]),
@@ -259,7 +291,8 @@ class TaskStore:
              agent_role, dedup_hash, timeout_s,
              correlation_id or uuid.uuid4().hex[:12],
              project_path,
-             status if status in ALLOWED else "queued", _now()),
+             status if status in ALLOWED else "queued", _now(),
+             resource_class, priority_class or "normal", privacy or ""),
         )
         con.commit()
         tid = cur.lastrowid
@@ -612,7 +645,7 @@ class TaskStore:
     # -- usage / cost -------------------------------------------------------
     def record_usage(self, task_id: int, requests=0, tokens_in=0, tokens_out=0,
                      latency_s=0, failures=0, cost_usd=0.0, provider=None,
-                     model=None) -> None:
+                     model=None, retries=0, deterministic_checks=0) -> None:
         t = self.get(task_id)
         if not t:
             return
@@ -622,16 +655,43 @@ class TaskStore:
         usage["tokens_out"] = usage.get("tokens_out", 0) + int(tokens_out)
         usage["latency_s"] = usage.get("latency_s", 0.0) + float(latency_s)
         usage["failures"] = usage.get("failures", 0) + int(failures)
-        usage.setdefault("callers", []).append({
-            "ts": _now(), "provider": provider, "model": model,
-            "tokens_in": int(tokens_in), "tokens_out": int(tokens_out),
-            "latency_s": float(latency_s),
-        })
-        if len(usage["callers"]) > 200:
-            usage["callers"] = usage["callers"][-200:]
+        usage["deterministic_checks"] = (usage.get("deterministic_checks", 0)
+                                         + int(deterministic_checks))
+        if requests:
+            usage.setdefault("model_calls", []).append({
+                "ts": _now(), "provider": provider, "model": model,
+                "tokens_in": int(tokens_in), "tokens_out": int(tokens_out),
+                "latency_s": float(latency_s), "ok": not failures,
+            })
+            if len(usage["model_calls"]) > 200:
+                usage["model_calls"] = usage["model_calls"][-200:]
+        if deterministic_checks:
+            usage["checks"] = usage.get("checks", 0) + int(deterministic_checks)
+        elif requests and "checks" not in usage:
+            usage["checks"] = 0
         fields = {"usage_json": json.dumps(usage, default=str)}
         fields["cost_usd"] = round((t.get("cost_usd") or 0) + float(cost_usd), 6)
+        if retries:
+            fields["retries"] = int(t.get("retries") or 0) + int(retries)
+        if deterministic_checks:
+            fields["deterministic_checks"] = (int(t.get("deterministic_checks") or 0)
+                                              + int(deterministic_checks))
         self._update(task_id, **fields)
+
+    # -- resource metadata ---------------------------------------------------
+    def set_resource_meta(self, task_id: int, resource_class: str | None = None,
+                          priority_class: str | None = None,
+                          privacy: str | None = None) -> None:
+        """Persist a task's resource/priority/privacy classification."""
+        fields = {}
+        if resource_class is not None:
+            fields["resource_class"] = resource_class
+        if priority_class is not None:
+            fields["priority_class"] = priority_class
+        if privacy is not None:
+            fields["privacy"] = privacy
+        if fields:
+            self._update(task_id, **fields)
 
     # -- queries ------------------------------------------------------------
     def counts(self) -> dict:

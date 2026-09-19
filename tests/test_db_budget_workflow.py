@@ -40,13 +40,14 @@ def fresh_store():
 # Phase 35: database hardening
 # ---------------------------------------------------------------------------
 class TestDatabaseHardening(unittest.TestCase):
-    def test_health_reports_integrity_and_version(self):
+    def test_health_reports_integrity_and_current_version(self):
         _, store = fresh_store()
         store.add_task("a")
         h = store.health_check()
         self.assertTrue(h["ok"])
         self.assertEqual(h["integrity"], "ok")
-        self.assertEqual(h["schema_version"], 1)
+        from elysia.core.tasks import SCHEMA_VERSION
+        self.assertEqual(h["schema_version"], SCHEMA_VERSION)
         self.assertEqual(h["journal_mode"], "wal")
         self.assertEqual(h["malformed_dependency_rows"], 0)
 
@@ -81,7 +82,8 @@ class TestDatabaseHardening(unittest.TestCase):
 
     def test_new_store_carries_schema_version(self):
         _, store = fresh_store()
-        self.assertEqual(store.health_check()["schema_version"], 1)
+        from elysia.core.tasks import SCHEMA_VERSION
+        self.assertEqual(store.health_check()["schema_version"], SCHEMA_VERSION)
 
 
 # ---------------------------------------------------------------------------

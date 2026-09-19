@@ -72,7 +72,29 @@ def model_ok():
 
 
 def start_stack():
-    log("model DOWN; attempting stack start")
+    """Bring the local model back up through the CANONICAL launcher.
+
+    ``elysia.core.modelserver`` owns the model process now: it keeps one copy,
+    derives ``--parallel`` from ``local_llm_concurrency``, and refuses to load a
+    model when free RAM is below the configured floor. The shell launcher is
+    kept only as a documented fallback for setups that start the stack
+    themselves; it runs after the canonical attempt reports why it could not.
+    """
+    log("model DOWN; attempting canonical model-server start")
+    try:
+        from elysia.core.config import load_config
+        from elysia.core.modelserver import ModelServer
+        srv = ModelServer.from_config(load_config())
+        out = srv.start()
+        log(f"canonical start: {out.get('status')} — {out.get('detail')}")
+        if out.get("ok") and (model_ok() or out.get("status") == "external"):
+            return True
+    except Exception as e:  # noqa: BLE001 — legacy host must still start
+        log(f"canonical model start unavailable: {type(e).__name__}: {e}")
+    if not os.path.exists(STACK_SH):
+        log("no canonical model server and no elysia-run.sh fallback")
+        return False
+    log("falling back to the stack launcher (elysia-run.sh start)")
     subprocess.run(["bash", STACK_SH, "start"],
                    capture_output=True, text=True, timeout=120)
     ok = model_ok()
@@ -196,21 +218,30 @@ def release_orphan_claims():
 
 
 def pool_running():
-    return subprocess.run(["pgrep", "-f", "adaptive.sh up"],
+    """True when a LEGACY OS worker pool is really alive (usually: never)."""
+    return subprocess.run(["pgrep", "-f", "adaptive[.]sh up"],
                           capture_output=True).returncode == 0
 
 
 def ensure_pool():
+    """COMPATIBILITY: no OS worker pool is ever spawned any more.
+
+    One ``worker_local.py`` process per logical agent was the old model. Work
+    now runs in-process (``elysia.core.executor.TaskExecutor``) against the
+    canonical scheduler, and an interrupted worker's tasks are recovered by the
+    scheduler's lease/timeout maintenance — so there is nothing to "relaunch".
+    If a legacy pool is somehow still running it is reported, not doubled.
+    """
+    if pool_running():
+        log("legacy OS worker pool detected; it should be stopped "
+            "(execution is in-process now)")
+        return
     open_count = len(tb("list", "open").splitlines())
     claimed_count = len(tb("list", "claimed").splitlines())
-    if open_count == 0 and claimed_count == 0:
-        return
-    if not pool_running():
-        log(f"{open_count} open + {claimed_count} claimed but pool dead; relaunching")
-        subprocess.Popen(
-            ["setsid", "bash", os.path.join(ORCH_DIR, "adaptive.sh"), "up", "1"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
+    if open_count or claimed_count:
+        log(f"{open_count} open + {claimed_count} claimed: in-process executor "
+            f"owns these (leases recovered by the scheduler); not spawning OS "
+            f"workers")
 
 
 def cycle():

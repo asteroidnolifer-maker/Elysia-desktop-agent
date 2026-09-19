@@ -2,6 +2,9 @@
 
 ``route(text)`` classifies the operator's request into an action:
 
+  environment— questions about THIS machine/repos ("what github repos do i own?")
+               answered by inspecting real local state, never by the model
+  progress   — follow-ups about a submitted goal ("is it done?", "any progress?")
   briefing   — status/capability questions ("what's running?", "are we ok?")
   knowledge  — tooling/authorization questions ("which tool scans ports?")
   research   — open questions needing the web ("what changed in CVE-X?")
@@ -19,6 +22,27 @@ import re
 
 # (route, pattern) — first match wins
 _ROUTES: list[tuple[str, re.Pattern]] = [
+    # Questions about the operator's own machine/repos. These must be answered
+    # from real local state (git remotes, gh, workspace) — the local model
+    # otherwise invents refusals like "I don't have access to your GitHub".
+    ("environment", re.compile(
+        r"\b(what|which|where|list|show) .{0,30}"
+        r"(repos?|repositories|remotes?|github|gitlab|checkout|workspace)\b|"
+        r"\bmy (repos?|repositories|remotes?|github)\b|"
+        r"\brepos? (do|can) i (own|have|access)\b|"
+        r"\bwhat('| i)?s my (branch|remote|repo)\b|"
+        r"\bwhere (is|are) (the|my) (repo|checkout|project)\b", re.I)),
+    # Follow-ups about a submitted goal — answered from durable board state.
+    ("progress", re.compile(
+        r"\b(is|are|was|were) (it|that|they|we|the tasks?|the jobs?) "
+        r"(done|finished|complete|completed|ready)\b|"
+        r"\b(done|finished|complete|completed) yet\b|"
+        r"\b(any|what|how much) (progress|update|status on (it|that))\b|"
+        r"\bdid (it|that|they) (finish|complete|work|succeed|fail)\b|"
+        r"\bhow('| i)?s (it|that|the (goal|task|workflow|job)) "
+        r"(going|coming|doing)\b|"
+        r"\bwhat happened (to|with) (it|that|the (goal|task|job))\b|"
+        r"\bstill (running|working|going)\b", re.I)),
     ("briefing", re.compile(
         r"\b(status|how are (we|things)|what('| i)?s running|any (tasks|work)"
         r"|board|are we (ok|good)|briefing|report in|capabilities?|"
@@ -53,7 +77,29 @@ def handle(text: str, deep: bool = False, timeout_s: float = 45.0) -> dict:
     route = classify(text)
     out: dict = {"route": route, "request": (text or "")[:200]}
     try:
-        if route == "briefing":
+        if route == "environment":
+            from .environment import environment_report
+            out.update(ok=True, text=environment_report())
+        elif route == "progress":
+            from .briefing import goal_progress
+            from .tasks import TaskStore
+            store = None
+            try:
+                import os
+                from .config import repo_root
+                db = os.path.join(repo_root(), "orchestrator",
+                                  "taskboard.sqlite")
+                if os.path.exists(db):
+                    store = TaskStore(db)
+            except Exception:  # noqa: BLE001
+                store = None
+            if store is None:
+                out.update(ok=False,
+                           text="No task board found — no goal has been "
+                                "submitted on this machine yet.")
+            else:
+                out.update(ok=True, text=goal_progress(store))
+        elif route == "briefing":
             from .briefing import brief
             from .config import load_config
             from .providers import ProviderManager

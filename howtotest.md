@@ -12,7 +12,7 @@ cd Elysia-desktop-agent          # repo root
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all 341 tests pass** — the original 88 plus the new
+Expected: **all 402 tests pass** — the original 88 plus the new
 `tests/test_providers_plus.py` bundle (provider presets, config integration,
 prompt styles, browser login store, knowledge base, HuggingFace catalog),
 the `tests/test_runtime_wiring.py` bundle (scheduler-in-server crash recovery,
@@ -23,8 +23,62 @@ bundle (see §1c), the `tests/test_boot_scripts.py` bundle (install/launch
 script contract; see §7b), the `tests/test_tool_layer.py` bundle (see §1d),
 the `tests/test_db_budget_workflow.py` bundle (DB hardening, budget
 enforcement, workflow gates — see §1e), the `tests/test_memory_context_healing.py`
-bundle (see §1f) and the `tests/test_task_graph.py` bundle (see §1g). No key,
-no network, no model required.
+bundle (see §1f), the `tests/test_task_graph.py` bundle (see §1g) andthe `tests/test_front_door.py` bundle (see §1i) and the
+`tests/test_resource_execution.py` bundle (see §1j). No key, no network, no model
+required.
+
+### 1i. Front door: grounded environment and progress answers
+
+The Jarvis chat used to hand machine/repo questions and goal follow-ups to the
+small local model, which answered with invented refusals ("I don't have access
+to your GitHub repositories", "I can't check the progress of a workflow"). The
+front door now routes those deterministically and answers from real state.
+
+- **environment route** (`elysia.core.environment`) — `what github repos do i
+ow` inspects this checkout's git remotes, the `gh` CLI and the workspace. When
+  `gh` is unavailable it says exactly that (`run gh auth login`) instead of
+  guessing. Never fabricates a repository list.
+- **progress route** (`elysia.core.briefing.goal_progress`) — `is it done`,
+  `any progress?`, `did it finish` read durable board state and report the
+  latest goal: `DONE`, `still running — 1/2 sub-task(s) completed`, or
+  `stopped — N failed`, plus each sub-task's status and last error.
+- **goal milestones carry a result** — a goal row is a milestone, not worker
+  output, but it is no longer empty, so the HUD shows a summary instead of
+  "(no result yet)".
+- **HUD counters map both vocabularies** — the DONE tile now counts canonical
+  `completed` tasks (it previously read 0 while dozens were finished).
+
+```bash
+./bin/elysia jarvis "what github repos do i own"   # -> environment
+./bin/elysia jarvis "is it done"                    # -> progress
+python3 -m unittest tests.test_front_door -v
+```
+
+### 1j. Resource-aware execution: many agents, one local model slot
+
+`tests/test_resource_execution.py` proves the core rule
+**LOGICAL AGENT ≠ MODEL PROCESS ≠ OS PROCESS ≠ PROVIDER REQUEST** on a
+simulated Intel i5-6300U (2 cores / 4 threads / 16 GB, no GPU). Full design,
+admission ladder and measured numbers: `RESOURCE_ARCHITECTURE.md`.
+
+```bash
+python3 -m unittest tests.test_resource_execution -v
+./bin/elysia resources          # live CPU/RAM/swap + held slots + waiting reasons
+./bin/elysia resources watch    # 2s refresh loop
+./bin/elysia queue              # task-centric waiting view
+./bin/elysia models             # local slots, warm state, batching honesty
+./bin/elysia master efficiency  # AI calls vs deterministic checks per task
+```
+
+Key guarantees exercised by the bundle: 20 logical agents complete through ONE
+local model slot (peak concurrency = 1); the slot survives provider exceptions,
+cancellation and timeouts; interactive requests outrank background work with
+aging so nothing starves; the CPU/RAM admission ladder defers heavy work with
+an exact reason; heavy classes are exclusive (no model + build at once);
+warm models unload only under sustained pressure with hysteresis;
+`local_only` privacy is structural (never sent remote); provider slots are
+reserved before a task starts; verification tasks finish with zero model calls;
+the model server refuses duplicate starts and RAM-floor violations.
 
 ### 1f. Layered memory, context planner, self-healing
 
@@ -204,6 +258,8 @@ kill %1
 ./bin/elysia prompt jarvis         # the briefing-officer system prompt
 ./bin/elysia jarvis "what's running?"    # natural-language front door
 ./bin/elysia jarvis "how do I scan my own server"   # -> knowledge route
+./bin/elysia jarvis "what github repos do i own"    # -> environment route
+./bin/elysia jarvis "is it done"                    # -> progress route (board state)
 ./bin/elysia jarvis --deep "latest llama.cpp features"  # -> deep research
 ./bin/elysia jarvis "add retry to the exporter"         # -> master control plane
 ./bin/elysia master agents | status | run "<goal>"

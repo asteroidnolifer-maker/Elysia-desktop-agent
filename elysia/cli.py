@@ -195,7 +195,7 @@ def cmd_task(args):
 
 
 # -- workers / providers -------------------------------------------------------
-def cmd_workers(_args):
+def cmd_workers(_args):  # noqa: D401
     from elysia.core.scheduler import WorkerRegistry
     wr = WorkerRegistry()
     print("workers (in-memory registry, see run/pid for live ones):")
@@ -222,12 +222,24 @@ def cmd_providers(args):
     pm.register_many(cfg.providers)
     for p in pm.list():
         cp = p.capacity()
-        print(f"{cp['name']:20} status={cp['status']:12} "
+        rp = p.resource_profile()
+        tag = "LOCAL" if rp["local"] else "remote"
+        print(f"{cp['name']:20} [{tag}] status={cp['status']:12} "
               f"concurrency={cp['current_concurrency']}/{cp['max_concurrency']} "
               f"requests={cp['requests']} failures={cp['failures']} "
               f"avg_lat={cp['avg_latency_s']}s")
+        print(f"{'':20} class={rp['resource_class']:<11} "
+              f"cpu_cost={rp['cpu_cost']:<5} ram={rp['ram_cost_mb']} MB "
+              f"privacy={rp['privacy']} circuit={rp['circuit']}")
         if cp["last_error"]:
             print(f"   last_error: {cp['last_error'][:100]}")
+    summary = pm.resource_summary()
+    print(f"\nfleet: {summary['providers']} provider(s), "
+          f"{summary['local']} local / {summary['remote']} remote | "
+          f"local slots={summary['local_concurrency']} "
+          f"remote slots={summary['remote_concurrency']} | "
+          f"est. local model RAM={summary['estimated_local_ram_mb']} MB | "
+          f"quarantined={summary['quarantined']}")
     total = pm.usage_totals()
     print("\nestimated totals:", json.dumps(total, indent=1))
     return 0
@@ -506,10 +518,198 @@ def cmd_cost(_args):
     return 0
 
 
-def cmd_resources(_args):
+def _resources_payload() -> dict:
+    """One honest resource picture: system, slots, holders, waiting work."""
     from elysia.core.resources import ResourceManager
-    rm = ResourceManager.from_config(load_config())
-    print(json.dumps(rm.report(), indent=1))
+    cfg = load_config()
+    rm = ResourceManager.from_config(cfg)
+    out = {"system": rm.report(), "limits": {},
+           "slots": {"held": [], "counts": {}, "waiting": {}},
+           "tasks": {"running": [], "waiting": []},
+           "local_model": {}, "providers": {}}
+    try:
+        mc = _master_controller()
+        r = mc.resource_report()
+        out["limits"] = r.get("limits") or {}
+        out["slots"] = {"held": (r.get("ledger") or {}).get("held", []),
+                        "counts": (r.get("ledger") or {}).get("counts", {}),
+                        "waiting": (r.get("ledger") or {}).get("waiting", {})}
+        snap = r.get("snapshot") or {}
+        out["system"].update({
+            "cpu_pct": snap.get("cpu_pct"),
+            "memory_mb_available": snap.get("mem_available_mb", -1),
+            "swap_used_mb": snap.get("swap_used_mb", -1),
+            "disk_free_mb": snap.get("disk_free_mb", -1),
+            "temperature_c": snap.get("temperature_c"),
+            "active_local_inference": snap.get("active_local_inference", 0),
+            "active_builds": snap.get("active_builds", 0),
+            "heavy_in_use": snap.get("heavy_in_use", 0),
+            "top_processes": snap.get("per_process") or [],
+        })
+        q = mc.queue_report()
+        out["tasks"] = {"running": q["running"], "waiting": q["waiting"]}
+        out["local_model"] = {"slots": (q["local_slot"] or {}).get("slots"),
+                              "running": (q["local_slot"] or {}).get("running"),
+                              "queued": (q["local_slot"] or {}).get("queued"),
+                              "warm": (r.get("pool") or {}).get("warm", {}),
+                              "stats": (r.get("pool") or {}).get("stats", {})}
+        out["providers"] = r.get("providers") or {}
+        out["router"] = (r.get("router") or {}).get("stats", {})
+    except Exception as e:  # noqa: BLE001 — reporting must never crash the CLI
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def _print_resources(rep: dict) -> None:
+    sys_ = rep.get("system") or {}
+    cpu = sys_.get("cpu_pct")
+    print(f"CPU: {cpu if cpu is not None else '?'}%  "
+          f"cores={sys_.get('cpu_count')}  load={sys_.get('load_avg')}")
+    print(f"RAM: {sys_.get('memory_mb_available', -1)} MB free of "
+          f"{sys_.get('memory_mb_total', -1)} MB   "
+          f"swap used={sys_.get('swap_used_mb', -1)} MB")
+    print(f"disk free={sys_.get('disk_free_mb', -1)} MB  "
+          f"gpu={sys_.get('gpu_available')}  "
+          f"temp={sys_.get('temperature_c')}C")
+    lim = rep.get("limits") or {}
+    if lim:
+        print(f"\nthresholds: cpu busy={lim.get('cpu_busy_pct')}% "
+              f"high={lim.get('cpu_high_pct')}% "
+              f"critical={lim.get('cpu_critical_pct')}% | "
+              f"ram min={lim.get('ram_min_free_mb')} MB "
+              f"block-infer={lim.get('ram_block_infer_mb')} MB")
+    counts = (rep.get("slots") or {}).get("counts") or {}
+    if counts:
+        active = {k: v for k, v in counts.items() if v}
+        print(f"slots in use: {active or 'none'}")
+    held = (rep.get("slots") or {}).get("held") or []
+    for h in held:
+        print(f"  held: {h['resource_class']:<12} by {h['owner']:<14} "
+              f"priority={h['priority']} age={h['age_s']}s")
+    lm = rep.get("local_model") or {}
+    if lm.get("slots") is not None:
+        print(f"\nlocal model: {lm.get('running')} running / "
+              f"{lm.get('slots')} slot(s), {lm.get('queued')} queued")
+    for name, st in (lm.get("warm") or {}).items():
+        print(f"  warm: {name} loaded={st.get('loaded')} "
+              f"idle={st.get('idle_s')}s loads={st.get('loads')} "
+              f"unloads={st.get('unloads')}")
+    prov = rep.get("providers") or {}
+    if prov:
+        print(f"\nproviders: {prov.get('providers')} total "
+              f"({prov.get('local')} local / {prov.get('remote')} remote) | "
+              f"local slots={prov.get('local_concurrency')} "
+              f"remote slots={prov.get('remote_concurrency')} "
+              f"quarantined={prov.get('quarantined')}")
+    running = (rep.get("tasks") or {}).get("running") or []
+    if running:
+        print(f"\nRUNNING ({len(running)}):")
+        for t in running[:12]:
+            print(f"  #{t['task_id']} {t['title'][:44]:<44} "
+                  f"{t['status']:<9} {t.get('resource_class') or '-':<12} "
+                  f"provider={t.get('provider') or '-'}")
+    waiting = (rep.get("tasks") or {}).get("waiting") or []
+    print(f"\nWAITING ({len(waiting)}):")
+    for t in waiting[:15]:
+        print(f"  #{t['task_id']} {t['title'][:44]:<44} "
+              f"class={t.get('resource_class') or '-':<12} "
+              f"priority={t.get('priority_class')}")
+        print(f"      reason: {t.get('reason') or 'not startable'}")
+    if rep.get("error"):
+        print(f"\nnote: {rep['error']}")
+
+
+def cmd_resources(args):
+    # `elysia queue` / `elysia models` are views of this one report.
+    view = getattr(args, "view", None)
+    if view == "queue":
+        return cmd_queue(args)
+    if view == "models":
+        return cmd_models(args)
+    if getattr(args, "watch", False):
+        interval = max(0.5, float(getattr(args, "interval", 2.0) or 2.0))
+        try:
+            while True:
+                print("\n" + "=" * 72)
+                rep = _resources_payload()
+                if getattr(args, "json", False):
+                    print(json.dumps(rep, indent=1, default=str))
+                else:
+                    _print_resources(rep)
+                import time as _t
+                _t.sleep(interval)
+        except KeyboardInterrupt:
+            print("\nstopped")
+            return 0
+    rep = _resources_payload()
+    if getattr(args, "json", False):
+        print(json.dumps(rep, indent=1, default=str))
+        return 0
+    _print_resources(rep)
+    return 0
+
+
+def cmd_queue(args):
+    mc = _master_controller()
+    q = mc.queue_report()
+    if getattr(args, "json", False):
+        print(json.dumps(q, indent=1, default=str))
+        return 0
+    local = q["local_slot"]
+    print(f"local model slot: {local['running']}/{local['slots']} running, "
+          f"{local['queued']} queued, {local['not_held']} ledger-held")
+    print(f"\nRUNNING ({len(q['running'])}):")
+    for t in q["running"]:
+        print(f"  #{t['task_id']} {t['title'][:44]:<44} {t['status']:<9} "
+              f"priority={t.get('priority_class')} "
+              f"class={t.get('resource_class') or '-'} "
+              f"provider={t.get('provider') or '-'}")
+    print(f"\nQUEUED / NOT STARTED ({len(q['waiting'])}):")
+    if not q["waiting"]:
+        print("  (nothing waiting)")
+    for t in q["waiting"]:
+        print(f"  #{t['task_id']} {t['title'][:44]:<44} status={t.get('status')}")
+        print(f"      resource={t.get('resource_class')} "
+              f"priority={t.get('priority_class')} "
+              f"needs={','.join(t.get('needs') or [])}")
+        print(f"      reason: {t.get('reason')}")
+    return 0
+
+
+def cmd_models(args):
+    mc = _master_controller()
+    rep = mc.resource_report()
+    pool = rep.get("pool") or {}
+    provider_rows = []
+    for row in (mc.providers.resource_profiles()):
+        provider_rows.append(row)
+    payload = {"local_slots": pool.get("slots"),
+               "running": pool.get("running"),
+               "queued": pool.get("queued"),
+               "stats": pool.get("stats"),
+               "warm": pool.get("warm"),
+               "batching": pool.get("batching"),
+               "providers": provider_rows}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=1, default=str))
+        return 0
+    print(f"local model slots: {payload['local_slots']} "
+          f"(heavy_slots={rep.get('limits', {}).get('heavy_exclusive')})")
+    for row in provider_rows:
+        tag = "LOCAL" if row["local"] else "remote"
+        print(f"\n{row['name']}  [{tag}]  {row['model']}")
+        print(f"  class={row['resource_class']:<11} "
+              f"cpu_cost={row['cpu_cost']:<5} ram={row['ram_cost_mb']} MB  "
+              f"concurrency={row['concurrency']}  "
+              f"latency={row['observed_latency_s']}s")
+        print(f"  status={row['status']} circuit={row['circuit']} "
+              f"privacy={row['privacy']} availability={row['availability']}")
+        for note in row["notes"]:
+            print(f"  note: {note}")
+    for name, st in (payload.get("warm") or {}).items():
+        print(f"warm: {name} loaded={st['loaded']} idle={st['idle_s']}s "
+              f"loads={st['loads']} unloads={st['unloads']}")
+    print("batching:", (payload.get("batching") or {}).get("note"))
     return 0
 
 
@@ -638,6 +838,44 @@ def cmd_master(args):
             print(f" {mark} {row['provider']:<16} {row['status']:<12} "
                   f"{row['requirement_pass']:<14} "
                   f"{row['reason'] or 'eligible'}")
+        return 0
+    if args.action == "efficiency":
+        rep = mc.efficiency_report(
+            task_id=int(args.goal) if (args.goal or "").isdigit() else None)
+        if args.json:
+            print(json.dumps(rep, indent=1, default=str))
+            return 0
+        print(f"{'task':<8} {'class':<12} {'prio':<12} {'AI':>4} {'checks':>6} "
+              f"{'tokens':>8} {'ai_s':>7} {'retries':>7} {'fail':>4}")
+        for row in rep["tasks"]:
+            print(f"#{row['task_id']:<7} {row['resource_class'] or '-':<12} "
+                  f"{row['priority_class'] or '-':<12} {row['ai_calls']:>4} "
+                  f"{row['deterministic_checks']:>6} "
+                  f"{row['tokens_in'] + row['tokens_out']:>8} "
+                  f"{row['ai_seconds']:>7.1f} {row['retries']:>7} "
+                  f"{row['failures']:>4}")
+        print(f"\ntotals: AI calls={rep['totals']['ai_calls']} "
+              f"deterministic checks={rep['totals']['deterministic_checks']} "
+              f"tokens={rep['totals']['tokens_in'] + rep['totals']['tokens_out']} "
+              f"ai_time={rep['totals']['ai_seconds']}s")
+        print(rep["note"])
+        return 0
+    if args.action == "queue":
+        q = mc.queue_report()
+        if args.json:
+            print(json.dumps(q, indent=1, default=str))
+            return 0
+        local = q["local_slot"]
+        print(f"local model slot: {local['running']}/{local['slots']} running, "
+              f"{local['queued']} queued")
+        for t in q["running"]:
+            print(f"  #{t['task_id']} RUNNING  {t['title'][:48]:<48} "
+                  f"{t['status']} provider={t.get('provider') or '-'}")
+        for t in q["waiting"]:
+            print(f"  #{t['task_id']} WAITING  {t['title'][:48]:<48}")
+            print(f"      reason: {t.get('reason')}")
+        if not q["running"] and not q["waiting"]:
+            print("  (board is quiet)")
         return 0
     if args.action == "agents":
         rows = mc.agents()
@@ -1132,7 +1370,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status")
     sub.add_parser("doctor")
     sub.add_parser("cost")
-    sub.add_parser("resources")
+
+    rsp = sub.add_parser("resources", help="live CPU/RAM/slot picture and why "
+                                           "work is queued")
+    rsp.add_argument("--watch", action="store_true",
+                     help="sample continuously (Ctrl-C to stop)")
+    rsp.add_argument("--interval", type=float, default=2.0)
+    rsp.add_argument("--json", action="store_true")
+
+    # `queue` and `models` are views of the ONE resources command, so the
+    # report and the runtime can never disagree about why work is waiting.
+    qp = sub.add_parser("queue", help="every task waiting and WHY it is waiting")
+    qp.add_argument("--json", action="store_true")
+    qp.set_defaults(cmd="resources", view="queue")
+
+    mp = sub.add_parser("models", help="local model slots, warm state and "
+                                        "unload policy")
+    mp.add_argument("--json", action="store_true")
+    mp.set_defaults(cmd="resources", view="models")
+
     sub.add_parser("workers")
 
     tp = sub.add_parser("tasks")
@@ -1219,7 +1475,7 @@ def build_parser() -> argparse.ArgumentParser:
     mc = sub.add_parser("master", help="master control plane: drive a goal "
                                        "through the agent pipeline")
     mc.add_argument("action", choices=["run", "status", "agents", "simulate",
-                                       "route"])
+                                       "route", "efficiency", "queue"])
     mc.add_argument("goal", nargs="?", default=None)
     mc.add_argument("--file", default=None,
                     help="simulate: analyse an explicit plan (JSON task list) "

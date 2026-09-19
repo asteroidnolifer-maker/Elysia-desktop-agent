@@ -29,6 +29,18 @@ class ProviderConfig:
     estimated_cost_usd: float = 0.0     # per-request estimate (for budget)
     priority: int = 0                   # lower = tried first (fallback routing)
     retries: int = 0
+    # -- resource profile (Phase: resource-aware execution) ---------------
+    #: True when the model runs ON this machine (shares the single heavy slot).
+    #: Left unset for .json configs; inferred from the URL/kind when None.
+    local: bool | None = None
+    #: Estimated resident cost of one request to this provider.
+    ram_cost_mb: int = 0
+    #: Relative CPU cost of one request (1.0 = a local chat call).
+    cpu_cost: float = 0.0
+    #: Privacy policy: "local_only" forbids sending task content remotely.
+    privacy: str = ""
+    #: Whether the backend genuinely supports request batching.
+    batch: bool = False
 
 
 @dataclass
@@ -48,6 +60,10 @@ class SchedulerConfig:
     timeout_default_s: int = 0          # 0 = no default per-task timeout
     dedup_enabled: bool = True
     retry_backoff_s: float = 30         # wait before a failed task re-claims
+    #: Seconds of waiting that lift a task one priority rank (anti-starvation).
+    dispatch_aging_s: float = 30.0
+    #: Interactive/CRITICAL work may start even while cpu is merely "busy".
+    interactive_preempt: bool = True
 
 
 @dataclass
@@ -82,6 +98,46 @@ class ResourcesConfig:
     reserve_mb: int = 1536
     worker_est_mb: int = 600
     max_cpu_fraction: float = 0.8
+    # -- live thresholds (adaptive scheduling ladder) ----------------------
+    cpu_busy_pct: float = 50.0
+    cpu_high_pct: float = 75.0
+    cpu_critical_pct: float = 90.0
+    ram_min_free_mb: int = 2048        # < this: no new model / heavy job
+    ram_block_infer_mb: int = 1024     # < this: block local inference
+    swap_max_used_mb: int = 1024
+    temp_max_c: float = 90.0
+    # -- execution slots ----------------------------------------------------
+    heavy_slots: int = 1               # local model / build / heavy CPU share
+    local_llm_concurrency: int = 1     # THE local model slot
+    remote_slots: int = 8              # cloud/CLI providers run in parallel
+    io_slots: int = 4
+    network_slots: int = 8
+    heavy_exclusive: bool = True
+    # -- routing ------------------------------------------------------------
+    prefer_remote_when_saturated: bool = True
+    allow_remote_under_pressure: bool = True
+    # -- local model lifecycle ---------------------------------------------
+    inference_timeout_s: int = 900
+    model_idle_ttl_s: int = 900        # unload after this idle period
+    model_warm_min_s: int = 300        # never unload sooner than this (hysteresis)
+    pressure_hold_s: float = 20.0      # pressure must persist this long
+    model_unload_command: list = field(default_factory=list)
+    # -- deterministic-first ------------------------------------------------
+    analysis_cache_ttl_s: int = 300
+    max_model_calls_per_task: int = 0  # 0 = unbounded
+    monitor_sample_interval_s: float = 1.0
+
+
+@dataclass
+class PrivacyConfig:
+    #: When True, tasks are only served by local providers unless a task
+    #: explicitly opts in. Default False preserves the existing behaviour of
+    #: using configured cloud providers; set True for a private machine.
+    local_only: bool = False
+    #: Tasks flagged local_only and tasks touching these globs never go remote.
+    sensitive_globs: list = field(default_factory=lambda: [
+        "*.env", "*.key", "*.pem", "*.p12", "**/secrets/**",
+        "**/credentials/**"])
 
 
 @dataclass
@@ -155,6 +211,7 @@ class Config:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     model_routing: ModelRoutingConfig = field(default_factory=ModelRoutingConfig)
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +353,11 @@ def apply_dict(cfg: Config, data: dict) -> None:
                         setattr(cfg.scheduler, k, v)
                 else:
                     if isinstance(s[k], bool):
-                        cfg.scheduler.dedup_enabled = s[k]
+                        setattr(cfg.scheduler, k, s[k])
+        if isinstance(s.get("dispatch_aging_s"), (int, float)) and s["dispatch_aging_s"] >= 0:
+            cfg.scheduler.dispatch_aging_s = _float(s["dispatch_aging_s"], 30.0)
+        if isinstance(s.get("interactive_preempt"), bool):
+            cfg.scheduler.interactive_preempt = s["interactive_preempt"]
     if isinstance(data.get("git"), dict):
         g = data["git"]
         if isinstance(g.get("auto_checkpoint"), bool):
@@ -329,11 +390,31 @@ def apply_dict(cfg: Config, data: dict) -> None:
             cfg.memory.embed = m["embed"]
     if isinstance(data.get("resources"), dict):
         r = data["resources"]
-        for k in ("max_local_workers", "reserve_mb", "worker_est_mb"):
-            if isinstance(r.get(k), int) and r[k] > 0:
+        for k in ("max_local_workers", "reserve_mb", "worker_est_mb",
+                  "ram_min_free_mb", "ram_block_infer_mb", "swap_max_used_mb",
+                  "heavy_slots", "local_llm_concurrency", "remote_slots",
+                  "io_slots", "network_slots", "inference_timeout_s",
+                  "model_idle_ttl_s", "model_warm_min_s",
+                  "analysis_cache_ttl_s", "max_model_calls_per_task"):
+            if isinstance(r.get(k), int) and r[k] >= 0:
                 setattr(cfg.resources, k, r[k])
-        if isinstance(r.get("max_cpu_fraction"), (int, float)):
-            cfg.resources.max_cpu_fraction = _float(r["max_cpu_fraction"], 0.8)
+        for k in ("max_cpu_fraction", "cpu_busy_pct", "cpu_high_pct",
+                  "cpu_critical_pct", "temp_max_c", "pressure_hold_s",
+                  "monitor_sample_interval_s"):
+            if isinstance(r.get(k), (int, float)):
+                setattr(cfg.resources, k, _float(r[k], getattr(cfg.resources, k)))
+        for k in ("heavy_exclusive", "prefer_remote_when_saturated",
+                  "allow_remote_under_pressure"):
+            if isinstance(r.get(k), bool):
+                setattr(cfg.resources, k, r[k])
+        if isinstance(r.get("model_unload_command"), list):
+            cfg.resources.model_unload_command = [str(x) for x in r["model_unload_command"]]
+    if isinstance(data.get("privacy"), dict):
+        pv = data["privacy"]
+        if isinstance(pv.get("local_only"), bool):
+            cfg.privacy.local_only = pv["local_only"]
+        if isinstance(pv.get("sensitive_globs"), list):
+            cfg.privacy.sensitive_globs = [str(x) for x in pv["sensitive_globs"]]
     if isinstance(data.get("logging"), dict):
         lg = data["logging"]
         if isinstance(lg.get("dir"), str) and lg["dir"]:
@@ -399,6 +480,11 @@ def apply_dict(cfg: Config, data: dict) -> None:
                     estimated_cost_usd=_float(p.get("estimated_cost_usd"), 0.0),
                     priority=_int(p.get("priority"), 0),
                     retries=_int(p.get("retries"), 0),
+                    local=(p.get("local") if isinstance(p.get("local"), bool) else None),
+                    ram_cost_mb=_int(p.get("ram_cost_mb"), 0),
+                    cpu_cost=_float(p.get("cpu_cost"), 0.0),
+                    privacy=str(p.get("privacy") or ""),
+                    batch=bool(p.get("batch")) if isinstance(p.get("batch"), bool) else False,
                 ))
 
 

@@ -19,6 +19,7 @@ with backoff, or abandon.
 """
 from __future__ import annotations
 
+import json
 import time
 
 from .agents_context import build_agent_context
@@ -67,10 +68,16 @@ class AgentPipeline:
                  memory: Memory | None = None,
                  correlation: Correlation | None = None,
                  execution_history: ExecutionHistory | None = None,
-                 tools=None):
+                 tools=None, router=None):
         self.providers = providers
         self.store = store
         self.resources = resources
+        # Resource-aware router (elysia.core.inference.ModelRouter). When
+        # attached, every stage call goes through it: the shared local model
+        # slot, remote providers under local saturation, and per-task usage
+        # accounting all live there. Without it the pipeline falls back to
+        # direct ProviderManager execution (compatibility path).
+        self.router = router
         self.events = events or EventBus()
         self.cfg = cfg
         # Canonical permissioned tool layer (elysia.core.toolkit.ToolLayer).
@@ -199,9 +206,12 @@ class AgentPipeline:
         return messages, plan["report"]
 
     # -- provider selection with fallback ------------------------------------
-    def _execute(self, messages, capabilities, task_id=None):
+    def _execute(self, messages, capabilities, task_id=None, role=None):
         self.events.emit("provider.selected", status="ok",
                          agent_id=self.correlation.agent_role, task_id=task_id)
+        if self.router is not None and role:
+            # resource-aware path: shared local slot / remote under saturation
+            return self._call(messages, role, task_id=task_id)
         text, err = self.providers.execute(messages, capabilities=capabilities,
                                            preferred=None)
         if err:
@@ -211,14 +221,32 @@ class AgentPipeline:
             return None, err
         return text, ""
 
-    def _call(self, messages, role: str, task_id=None, reservation=None):
+    def _call(self, messages, role: str, task_id=None, reservation=None,
+              task=None):
         """Provider call for one pipeline stage.
 
-        If a held ProviderReservation is supplied (scheduler-owned slot) it is
-        used directly — the slot was acquired once and is released on finish.
-        Otherwise fall back to Manager.execute (atomic self-service reserve).
+        With a router attached this is resource-aware: a scheduler-held slot is
+        reused, a ``local_only`` task can only use the local model, and work is
+        offloaded to a remote provider when the local slot is saturated. Usage
+        is attributed to the owning task (calls, tokens, seconds, failures).
         """
         caps = self._role_caps(role)
+        if self.router is not None:
+            r = self.router.call(messages, capabilities=caps,
+                                 task=task if task is not None
+                                 else {"id": task_id},
+                                 role=role,
+                                 priority=(task or {}).get("priority_class")
+                                 or "normal",
+                                 reservation=reservation)
+            self._record_usage(task_id, r.get("usage") or {})
+            if not r.get("ok"):
+                err = r.get("error") or "model call failed"
+                self.events.emit("provider.fallback", status="error",
+                                 agent_id=role, task_id=task_id,
+                                 error=err[:200])
+                return None, err
+            return r.get("text") or "", ""
         if reservation is not None:
             text, err = reservation.call_failover(messages, capabilities=caps)
         else:
@@ -228,6 +256,111 @@ class AgentPipeline:
                              agent_id=role, task_id=task_id, error=err[:200])
             return None, err
         return text, ""
+
+    def _record_usage(self, task_id, usage: dict) -> None:
+        """Attribute one model call to its task (never raises)."""
+        if task_id is None or not usage:
+            return
+        try:
+            self.store.record_usage(
+                task_id, requests=1,
+                tokens_in=int(usage.get("tokens_in") or 0),
+                tokens_out=int(usage.get("tokens_out") or 0),
+                latency_s=float(usage.get("seconds") or 0.0),
+                failures=0 if usage.get("ok", True) else 1,
+                cost_usd=0.0, provider=usage.get("provider") or None,
+                model=usage.get("model") or None)
+        except Exception:  # noqa: BLE001 — accounting must never fail a task
+            pass
+
+    # -- deterministic-first (Phase: model-call minimization) ----------------
+    #: Task shapes that are pure verification: a real check answers them, so no
+    #: model is called at all.
+    _CHECK_ROLES = {"tester", "qa", "qa_engineer", "verifier", "linter",
+                    "formatter", "builder", "integration_tester",
+                    "integration_agent", "release_engineer"}
+    #: Verbs that mean "change code" — those genuinely need a model.
+    _CHANGE_VERBS = ("write", "add ", "create", "implement", "fix", "refactor",
+                     "update", "rename", "migrate", "rewrite", "generate",
+                     "design", "integrate", "scaffold")
+
+    def _is_change_task(self, task: dict) -> bool:
+        text = f"{task.get('title', '')} {task.get('description', '')}".lower()
+        if task.get("owned_files"):
+            return any(v in text for v in self._CHANGE_VERBS) \
+                or not any(k in text for k in ("test", "lint", "validate",
+                                               "check", "verify", "compile"))
+        return any(v in text for v in self._CHANGE_VERBS)
+
+    def deterministic_checks(self, task: dict, ws) -> dict | None:
+        """Answer a verification task with REAL checks and zero model calls.
+
+        Returns None when the task actually requires code changes (so the model
+        path runs), otherwise a report of the checks that genuinely executed.
+        """
+        text = f"{task.get('title', '')} {task.get('description', '')}".lower()
+        role = (task.get("agent_role") or "").strip()
+        wanted: list[str] = []
+        if "test" in text or role in ("tester", "qa", "qa_engineer", "verifier",
+                                      "integration_tester"):
+            wanted.append("tests")
+        if any(k in text for k in ("compile", "syntax", "lint", "typecheck",
+                                   "type check")) \
+                or role in ("linter", "formatter", "builder"):
+            wanted.append("compile")
+        if "json" in text:
+            wanted.append("json")
+        if not wanted:
+            return None
+        if self._is_change_task(task):
+            return None          # needs a real code change: model path
+        checks: list[dict] = []
+        if "compile" in wanted:
+            from .qa import validate_project
+            rep = validate_project(ws.root)
+            py = rep.get("py") or {}
+            checks.append({"check": "compile", "ok": bool(py.get("ok")),
+                           "detail": f"compiled {py.get('count', 0)} python "
+                                     f"file(s)"
+                                     + ("" if py.get("ok") else
+                                        f"; errors: {py.get('errors')}")})
+        if "json" in wanted:
+            bad = []
+            for p in (task.get("read_files") or []) + (task.get("owned_files") or []):
+                if not str(p).endswith(".json"):
+                    continue
+                try:
+                    with open(ws.resolve(p), encoding="utf-8") as f:
+                        json.load(f)
+                except (OSError, json.JSONDecodeError) as e:
+                    bad.append(f"{p}: {type(e).__name__}: {e}"[:120])
+            checks.append({"check": "json", "ok": not bad,
+                           "detail": "strict JSON parse" if not bad
+                                     else "; ".join(bad[:3])})
+        if "tests" in wanted:
+            out = self._run_tests(ws)
+            ran = bool(out)
+            ok = ran and "rc=0" in out
+            checks.append({"check": "tests", "ok": ok,
+                           "detail": out or "no test runner discovered"})
+        if not checks:
+            return None
+        ok = all(c["ok"] for c in checks)
+        summary = "; ".join(f"{c['check']}: "
+                            f"{'ok' if c['ok'] else 'FAILED'} ({c['detail']})"
+                            for c in checks)
+        if task.get("id") is not None:
+            try:
+                self.store.record_usage(task["id"],
+                                        deterministic_checks=len(checks))
+            except Exception:  # noqa: BLE001
+                pass
+        self.events.emit("agent.run", agent_id=role or "verifier",
+                         task_id=task.get("id"),
+                         status="ok" if ok else "error",
+                         detail=f"deterministic checks (no model call): {summary}"[:200])
+        return {"ok": ok, "checks": checks, "summary": summary,
+                "model_calls": 0}
 
     # -- execution -----------------------------------------------------------
     def solve_task(self, task: dict, workspace, reservation=None,
@@ -250,6 +383,35 @@ class AgentPipeline:
         ws = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
         owned = [f for f in (task.get("owned_files") or []) if f]
         spec = task.get("description") or task.get("title") or ""
+        # DETERMINISTIC FIRST: a verification task is answered by the real
+        # compiler/test runner — never by a model that would have to guess.
+        det = self.deterministic_checks(task, ws)
+        if det is not None:
+            summary = (f"deterministic checks ({len(det['checks'])}) — "
+                       f"no model call\n{det['summary']}")
+            if tid is not None:
+                try:
+                    self.store.transition(tid, "running")
+                except Exception:  # already past running is fine
+                    pass
+                try:
+                    self.store.complete(tid, "reviewing", summary,
+                                        test_status=det["summary"][:300])
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                self.memory.remember_task_context(
+                    task, {"deterministic_checks": det["summary"][:400]})
+            except Exception:  # noqa: BLE001 — memory must never fail a task
+                pass
+            if not det["ok"]:
+                return self._stage_fail(tid, "testing",
+                                        f"deterministic checks failed: "
+                                        f"{det['summary']}", task=task)
+            return {"ok": True, "status": "reviewing", "result": summary,
+                    "tests": det["summary"], "review": "",
+                    "deterministic": True, "checks": det["checks"],
+                    "model_calls": 0}
         self.events.emit("agent.run", agent_id="implementer", task_id=tid,
                          status="started")
         if tid is not None:
@@ -259,7 +421,7 @@ class AgentPipeline:
                 pass
         messages, context_report = self.implementer_messages(task, ws, owned)
         text, err = self._call(messages, "implementer", task_id=tid,
-                               reservation=reservation)
+                               reservation=reservation, task=task)
         if err:
             return self._stage_fail(tid, "running", f"implementer: {err}",
                                     task=task)
@@ -502,7 +664,8 @@ class AgentPipeline:
         ]
         self.events.emit("agent.run", agent_id="planner",
                          status="started")
-        text, err = self._execute(messages, self._role_caps("planner"))
+        text, err = self._execute(messages, self._role_caps("planner"),
+                                  role="planner")
         if err:
             return {"ok": False, "error": err}
         tasks = parse_plan(text)
@@ -531,7 +694,7 @@ class AgentPipeline:
         self.events.emit("agent.run", agent_id="architect", task_id=task_id,
                          status="started")
         text, err = self._execute(messages, self._role_caps("architect"),
-                                  task_id=task_id)
+                                  task_id=task_id, role="architect")
         if err:
             return {"ok": False, "error": err}
         return {"ok": True, "architecture": text}
@@ -547,6 +710,7 @@ class AgentPipeline:
         self.events.emit("agent.run", agent_id="implementer",
                          status="started")
         text, err = self._execute(messages, self._role_caps("implementer"),
+                                  role="implementer",
                                   task_id=task_id)
         if err:
             return {"ok": False, "error": err}
@@ -564,6 +728,7 @@ class AgentPipeline:
         self.events.emit("agent.run", agent_id="tester", task_id=task_id,
                          status="started")
         text, err = self._execute(messages, self._role_caps("tester"),
+                                  role="tester",
                                   task_id=task_id)
         if err:
             return {"ok": False, "error": err}
@@ -581,6 +746,7 @@ class AgentPipeline:
         self.events.emit("agent.run", agent_id="code_reviewer",
                          task_id=task_id, status="started")
         text, err = self._execute(messages, self._role_caps("code_reviewer"),
+                                  role="code_reviewer",
                                   task_id=task_id)
         if err:
             return {"ok": False, "error": err}
@@ -596,6 +762,7 @@ class AgentPipeline:
         self.events.emit("agent.run", agent_id="documentation_agent",
                          task_id=task_id, status="started")
         text, err = self._execute(messages, self._role_caps("documentation_agent"),
+                                  role="documentation_agent",
                                   task_id=task_id)
         if err:
             return {"ok": False, "error": err}

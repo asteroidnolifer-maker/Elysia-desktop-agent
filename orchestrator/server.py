@@ -99,22 +99,45 @@ def db():
 
 
 def board_counts():
+    """Raw per-status counts plus the legacy buckets the HUD tiles render.
+
+    The canonical store uses ready/completed; the HUD was written against
+    open/done. Reporting only one vocabulary made the DONE tile read 0 while
+    dozens of tasks were completed, so both are exposed here.
+    """
     con = db()
     rows = con.execute("SELECT status, COUNT(*) c FROM tasks GROUP BY status").fetchall()
     con.close()
-    counts = {"open": 0, "claimed": 0, "done": 0, "failed": 0, "archived": 0}
-    for r in rows:
-        counts[r["status"]] = r["c"]
-    counts["total"] = sum(counts.values())
+    raw = {r["status"]: r["c"] for r in rows}
+    counts = dict(raw)
+    counts.update({
+        "open": raw.get("queued", 0) + raw.get("ready", 0),
+        "claimed": (raw.get("claimed", 0) + raw.get("running", 0)
+                    + raw.get("testing", 0) + raw.get("reviewing", 0)
+                    + raw.get("retrying", 0)),
+        "done": raw.get("completed", 0) + raw.get("done", 0),
+        "failed": (raw.get("failed", 0) + raw.get("cancelled", 0)
+                   + raw.get("dependency_failed", 0)),
+        "archived": raw.get("archived", 0),
+        "total": sum(raw.values()),
+    })
     return counts
 
 
 def recent_tasks(limit=40, status=None):
+    """Recent tasks. ``status`` may be one status or a comma-separated set.
+
+    The canonical store splits "open" across ready/queued and "done" across
+    done/completed, so callers can ask for a group ("ready,queued") rather
+    than silently getting an empty list for a legacy name.
+    """
     con = db()
     q = "SELECT * FROM tasks"
     if status:
-        q += " WHERE status=?"
-        rows = con.execute(q + " ORDER BY id DESC LIMIT ?", (status, limit)).fetchall()
+        wanted = [s.strip() for s in str(status).split(",") if s.strip()]
+        q += " WHERE status IN (" + ",".join("?" * len(wanted)) + ")"
+        rows = con.execute(q + " ORDER BY id DESC LIMIT ?",
+                           (*wanted, limit)).fetchall()
     else:
         rows = con.execute(q + " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     con.close()
@@ -410,6 +433,35 @@ def classify_intent(msg):
     # a specific task reference (#123) is always a lookup, not a chat topic
     if re.search(r"#\d+", low):
         return "status"
+    # 0.4) follow-up progress questions ("is it done?") are answered from the
+    # durable board, never by the model — which otherwise claims it "can't
+    # check the progress of a workflow".
+    if re.search(r"\b(is|are|was|were)\s+(it|that|they|we|the\s+"
+                 r"(?:tasks?|jobs?|goals?|workflow|build|change[sd]?))\s+"
+                 r"(done|finished|complete|completed|ready)\b", low) \
+       or re.search(r"\b(done|finished|complete|completed|ready)\s+yet\b", low) \
+       or re.search(r"\b(any|what|how much)\s+(progress|update)\b", low) \
+       or re.search(r"\bdid\s+(it|that|they)\s+"
+                    r"(finish|complete|work|succeed|fail)\b", low) \
+       or re.search(r"\bhow([' ]?s| is)\s+(it|that|the\s+"
+                    r"(?:goal|task|workflow|job|build))\s+"
+                    r"(going|coming|doing)\b", low) \
+       or re.search(r"\bwhat happened (to|with)\s+(it|that|the\s+"
+                    r"(?:goal|task|job))\b", low) \
+       or re.search(r"\bstill\s+(running|working|going)\b", low):
+        return "progress"
+    # 0.5) questions about THIS machine / the operator's repos are answered by
+    # inspecting real local state (git remotes, gh, workspace) — the small
+    # model otherwise invents refusals like "I have no access to your GitHub".
+    if re.search(r"\b(what|which|where|list|show)\b.{0,30}\b"
+                 r"(repos?|repositories|remotes?|github|gitlab|checkout|"
+                 r"workspace)\b", low) \
+       or re.search(r"\bmy\s+(repos?|repositories|remotes?|github)\b", low) \
+       or re.search(r"\brepos?\s+(do|can)\s+i\s+(own|have|access)\b", low) \
+       or re.search(r"\bwhat([' ]?s| is)\s+my\s+(branch|remote|repo)\b", low) \
+       or re.search(r"\bwhere\s+(is|are)\s+(the|my)\s+"
+                    r"(repo|checkout|project)\b", low):
+        return "environment"
     # 1) strong ask-for-status phrasing (numbers/state) wins
     status_strong = ["status", "how many", "how much", "count", "report",
                      "progress", "health", "running", "online",
@@ -478,36 +530,53 @@ def status_summary(msg=""):
                 L.append(f"    result: {t['result'][:160]}")
             return "\n".join(L)
     if c["failed"]:
-        f = recent_tasks(limit=4, status="failed")
+        f = recent_tasks(limit=4, status="failed,cancelled,dependency_failed")
         if f:
             L.append("  last failed:")
             for t in f:
                 L.append(f"    #{t['id']} {t['title'][:60]}")
+    if c["claimed"]:
+        r = recent_tasks(limit=4, status="claimed,running,testing,reviewing")
+        if r:
+            L.append("  running now:")
+            for t in r:
+                L.append(f"    #{t['id']} {t['title'][:60]} "
+                         f"[{t['status']} / {t.get('worker') or '-'}]")
     if c["open"]:
-        o = recent_tasks(limit=3, status="open")
+        o = recent_tasks(limit=3, status="ready,queued")
         if o:
             L.append("  open now:")
             for t in o:
                 L.append(f"    #{t['id']} {t['title'][:60]}")
     if c["done"]:
-        d = recent_tasks(limit=3, status="done")
+        d = recent_tasks(limit=3, status="completed,done")
         if d:
             L.append("  latest done:")
             for t in d:
                 L.append(f"    #{t['id']} {t['title'][:60]} "
-                          f"by {t['worker']}")
+                          f"by {t['worker'] or '-'}")
     return "\n".join(L)
 
 
 def general_chat(message, history):
-    """A conversational answer from the local model."""
+    """A conversational answer from the local model, grounded in reality.
+
+    The system prompt deliberately forbids the invented refusals the small
+    model used to produce ("I don't have access to your GitHub repos", "I
+    can't check the progress of a workflow"): JARVIS runs on THIS machine and
+    the files, git repos, task board and agents are all local.
+    """
     hist = (history or [])[-8:]
     msgs = [{"role": "system", "content":
-             "You are JARVIS, the operator assistant of the Elysia offline "
-             "multi-agent coding system on this machine. Answer concisely in "
-             "plain text (no markdown). If asked about live system state "
-             "(counts, health, agents) tell the user to type 'status'. "
-             "Be honest about limits: you run on a small local model."}]
+             "You are JARVIS, the operator assistant of the Elysia system "
+             "running ON THIS MACHINE. You are not a remote chatbot: the "
+             "files, git repositories, task board and worker agents are all "
+             "local to this computer. Answer concisely in plain text (no "
+             "markdown). Never claim you lack access to local data and never "
+             "tell the user to contact an administrator — instead say what "
+             "you can check. For live system state (counts, health, agents) "
+             "tell the user to type 'status', and for a running goal to type "
+             "'is it done?'. If you genuinely don't know, say so plainly."}]
     for h in hist:
         if isinstance(h, dict) and h.get("role") in ("user", "assistant"):
             msgs.append({"role": h["role"],
@@ -735,24 +804,51 @@ def ensure_executor() -> bool:
 ## ----------------------------- pool -----------------------------
 
 def start_pool(cap=2):
-    if proc_up("adaptive\\.sh up"):
-        return {"ok": True, "msg": "pool already running"}
-    # Pin workers to the unified workspace even if the server's own
-    # environment has a stale ELYSIA_WS (or none) from the old layout.
-    env = dict(os.environ, ELYSIA_WS=WS_DIR)
-    subprocess.Popen(
-        ["setsid", "bash", ADAPTIVE, "up", str(cap)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, start_new_session=True, env=env)
-    log(f"pool start requested (cap={cap})")
-    return {"ok": True, "msg": f"pool starting (cap={cap})"}
+    """COMPATIBILITY: execution is in-process now, so there is no OS pool.
+
+    The old implementation spawned ``adaptive.sh up <cap>``, i.e. N
+    ``worker_local.py`` OS processes — one per logical agent — each of which
+    claimed tasks from the board. That is exactly the architecture the
+    resource-aware scheduler replaced: logical agents are cheap in-process
+    roles, and only ONE expensive model slot exists. A caller that asks for a
+    pool is pointed at the canonical executor (already running in this server)
+    instead of being handed a second, unchecked execution path.
+    """
+    ok = False
+    try:
+        ok = ensure_executor()
+    except Exception as e:  # noqa: BLE001
+        log(f"executor start failed: {e}")
+        return {"ok": False, "msg": f"executor unavailable: {e}",
+                "legacy_pool": False}
+    log(f"pool request redirected to the in-process task executor (cap={cap})")
+    return {"ok": True, "deprecated": True,
+            "msg": "execution is in-process (TaskExecutor + shared local model "
+                   f"slot); legacy OS worker pool not started (cap={cap} "
+                   "requested)",
+            "executor": bool(ok), "workers": 0,
+            "note": "TaskExecutor bounds work by resources "
+                    "(local_llm_concurrency=1 on this machine)"}
 
 
 def stop_pool():
-    subprocess.run(["bash", ADAPTIVE, "down"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    log("pool stop requested")
-    return {"ok": True, "msg": "pool stopping"}
+    """Stop execution; still tears down a legacy pool if one is really running."""
+    global EXECUTOR
+    try:
+        if EXECUTOR is not None:
+            EXECUTOR.stop()
+            EXECUTOR = None
+    except Exception as e:  # noqa: BLE001
+        log(f"executor stop failed: {e}")
+    legacy = False
+    if os.path.exists(ADAPTIVE) and proc_up("adaptive\\.sh up"):
+        subprocess.run(["bash", ADAPTIVE, "down"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        legacy = True
+        log("legacy OS worker pool stopped")
+    return {"ok": True, "legacy_pool_stopped": legacy,
+            "msg": "executor stopped" + ("; legacy pool stopped" if legacy
+                                          else "")}
 
 
 ## ----------------------------- HTTP -----------------------------
@@ -988,6 +1084,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "type": "text",
                                     "intent": "status",
                                     "reply": status_summary(message)})
+        if intent == "progress":
+            from elysia.core.briefing import goal_progress
+            ref = re.search(r"#(\d+)", message)
+            reply = goal_progress(taskboard.store(),
+                                  goal_id=int(ref.group(1)) if ref else None)
+            return self._send(200, {"ok": True, "type": "text",
+                                    "intent": "progress", "reply": reply})
+        if intent == "environment":
+            from elysia.core.environment import environment_report
+            return self._send(200, {"ok": True, "type": "text",
+                                    "intent": "environment",
+                                    "reply": environment_report()})
         if intent == "pool":
             r = start_or_stop_from(message)
             return self._send(200, {"ok": True, "type": "text",

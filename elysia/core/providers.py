@@ -71,6 +71,35 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text or "") // 4)
 
 
+# ---------------------------------------------------------------------------
+# Locality: is this provider running on THIS machine?
+# ---------------------------------------------------------------------------
+#: Model servers that run locally by definition (whatever the URL says).
+LOCAL_KINDS = frozenset({"llama", "llamacpp", "llama.cpp", "ollama", "lmstudio",
+                         "vllm", "llamafile", "koboldcpp", "local", "tgi"})
+#: Hosts that mean "this machine".
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0", "::1", "[::1]")
+#: Rough resident-memory estimate for a quantised model by parameter count (MB).
+#: A labelled estimate, never a measurement.
+_PARAM_RAM_MB = (("70b", 40000), ("34b", 20000), ("32b", 19000), ("13b", 8000),
+                 ("8b", 5200), ("7b", 4700), ("3b", 2200), ("1.5b", 1200),
+                 ("1b", 800), ("0.5b", 500))
+LOCAL_MODEL_DEFAULT_MB = 4800      # a 7B Q4 model plus its runtime
+
+
+def estimate_model_mb(model: str) -> tuple[int, str]:
+    """Estimated RAM for a local model, with the reasoning string."""
+    low = (model or "").lower()
+    for tag, mb in _PARAM_RAM_MB:
+        if tag in low:
+            return mb, f"estimated from the '{tag}' size tag in the model name"
+    return LOCAL_MODEL_DEFAULT_MB, "no size tag in the model name; assumed a 7B-class local model"
+
+def _is_local_url(url: str) -> bool:
+    low = (url or "").lower()
+    return any(f"//{h}" in low or low.startswith(f"{h}:") for h in LOCAL_HOSTS)
+
+
 class Provider:
     HEALTHY = "healthy"
     DEGRADED = "degraded"
@@ -126,6 +155,83 @@ class Provider:
         if not caps:
             return True
         return all(self.has_capability(c) for c in caps)
+
+    # -- locality / resource profile --------------------------------------
+    def is_local(self) -> bool:
+        """True when the model runs on THIS machine (shares the heavy slot).
+
+        Explicit config (``local: true/false``) always wins; otherwise a local
+        kind or a loopback base_url means local. CLI providers are NOT local:
+        they mostly wait on a remote API, so they must not consume the local
+        model slot.
+        """
+        explicit = getattr(self.cfg, "local", None)
+        if isinstance(explicit, bool):
+            return explicit
+        if (self.cfg.kind or "").lower() in LOCAL_KINDS:
+            return True
+        return _is_local_url(self.cfg.base_url or "")
+
+    def spawns_local_process(self) -> bool:
+        """True when a call starts an OS process on this machine (CLI agents)."""
+        return (self.cfg.kind or "").lower() == "cli"
+
+    def privacy_policy(self) -> str:
+        """``local_only`` | ``remote_allowed`` (what this provider may receive)."""
+        explicit = (getattr(self.cfg, "privacy", "") or "").strip().lower()
+        if explicit:
+            return explicit
+        return "local_only" if self.is_local() else "remote_allowed"
+
+    def resource_profile(self) -> dict:
+        """Estimated cost of ONE request, for resource-aware routing.
+
+        Every number is either configured, measured from real calls, or a
+        clearly-labelled estimate — never a fabricated measurement.
+        """
+        local = self.is_local()
+        cli = self.spawns_local_process()
+        notes: list[str] = []
+        ram = int(getattr(self.cfg, "ram_cost_mb", 0) or 0)
+        cpu = float(getattr(self.cfg, "cpu_cost", 0.0) or 0.0)
+        if ram <= 0:
+            if local:
+                ram, why = estimate_model_mb(self.cfg.model)
+                notes.append(why)
+            elif cli:
+                ram = 150
+                notes.append("CLI provider: one short-lived local process")
+            else:
+                ram = 0
+                notes.append("remote provider: no local model memory")
+        if cpu <= 0:
+            cpu = 1.0 if local else (0.35 if cli else 0.05)
+            notes.append("relative CPU cost estimate" if local else
+                         "mostly waiting on the network")
+        avg_latency = (round(self.total_latency_s / self.requests, 3)
+                       if self.requests else None)
+        return {
+            "name": self.name,
+            "kind": self.cfg.kind,
+            "model": self.cfg.model,
+            "local": local,
+            "spawns_process": cli,
+            "resource_class": "local_llm" if local else "remote_llm",
+            "cpu_cost": cpu,
+            "ram_cost_mb": ram,
+            "concurrency": self.cfg.concurrency,
+            "in_flight": self.in_flight,
+            "capabilities": list(self.cfg.capabilities or []),
+            "availability": self.success_rate(),
+            "status": self.status,
+            "circuit": self.circuit_state(),
+            "observed_latency_s": avg_latency,
+            "estimated_cost_usd": round(
+                float(getattr(self.cfg, "estimated_cost_usd", 0.0) or 0.0), 6),
+            "privacy": self.privacy_policy(),
+            "batch": bool(getattr(self.cfg, "batch", False)),
+            "notes": notes,
+        }
 
     # -- concurrency accounting ------------------------------------------
     def acquire(self) -> bool:
@@ -432,20 +538,40 @@ class ProviderReservation:
     """A held provider slot. Guarantees exactly one acquire-release pair.
 
     Usable as a context manager; the slot is released on exit even if the
-    underlying call raises.
+    underlying call raises. After each call, ``usage`` holds this call's
+    tokens/duration so callers (the model pool, the executor) can attribute
+    cost to the owning task without guessing.
     """
 
     def __init__(self, manager: "ProviderManager", provider: Provider):
         self.manager = manager
         self.provider = provider
+        self.usage: dict = {}
+
+    def _record_usage(self, messages, text, err, seconds) -> None:
+        def join(msgs):
+            return "\n".join(str(m.get("content", "")) for m in (msgs or []))
+        self.usage = {
+            "provider": self.provider.name if self.provider else "",
+            "model": self.provider.cfg.model if self.provider else "",
+            "local": bool(self.provider and self.provider.is_local()),
+            "tokens_in": estimate_tokens(join(messages)),
+            "tokens_out": estimate_tokens(text or ""),
+            "seconds": round(seconds, 3),
+            "ok": not err,
+            "estimated": True,
+        }
 
     def call(self, messages, max_tokens: int | None = None,
              temperature: float | None = None, timeout: int | None = None):
         if self.provider is None:
             return None, "reservation released"
-        return self.provider._chat_unaccounted(
+        t0 = time.time()
+        text, err = self.provider._chat_unaccounted(
             messages, max_tokens=max_tokens, temperature=temperature,
             timeout=timeout)
+        self._record_usage(messages, text, err, time.time() - t0)
+        return text, err
 
     def call_failover(self, messages, capabilities=None, max_tokens=None,
                       temperature=None, timeout=None):
@@ -460,9 +586,11 @@ class ProviderReservation:
             return self.manager.execute(messages, capabilities=capabilities,
                                         max_tokens=max_tokens,
                                         temperature=temperature, timeout=timeout)
+        t0 = time.time()
         text, err = self.provider._chat_unaccounted(
             messages, max_tokens=max_tokens, temperature=temperature,
             timeout=timeout)
+        self._record_usage(messages, text, err, time.time() - t0)
         if err:
             self.release()
             text, err = self.manager.execute(
@@ -566,6 +694,41 @@ class ProviderManager:
         ps = self.list()
         order = {k: i for i, k in enumerate(self._ordering)}
         return sorted(ps, key=lambda p: order.get((p.cfg.kind, p.cfg.label), 999))
+
+    # -- locality / resource-aware routing ---------------------------------
+    def local_providers(self) -> list[Provider]:
+        """Providers whose model runs on THIS machine (the shared heavy slot)."""
+        return [p for p in self._ordered() if p.is_local()]
+
+    def remote_providers(self) -> list[Provider]:
+        """Providers that do not consume the local model slot."""
+        return [p for p in self._ordered() if not p.is_local()]
+
+    def local_capacity(self) -> dict:
+        """How many local inferences can be in flight at once (config-driven)."""
+        locals_ = self.local_providers()
+        return {"providers": [p.name for p in locals_],
+                "concurrency": sum(max(1, p.cfg.concurrency) for p in locals_)}
+
+    def resource_profiles(self) -> list[dict]:
+        """One row per provider: estimated CPU/RAM/latency/cost/capability."""
+        return [p.resource_profile() for p in self._ordered()]
+
+    def resource_summary(self) -> dict:
+        """Aggregate the provider fleet's resource picture (no invented data)."""
+        profs = self.resource_profiles()
+        local = [p for p in profs if p["local"]]
+        return {
+            "providers": len(profs),
+            "local": len(local),
+            "remote": len(profs) - len(local),
+            "local_concurrency": sum(max(1, p["concurrency"]) for p in local),
+            "remote_concurrency": sum(max(1, p["concurrency"])
+                                      for p in profs if not p["local"]),
+            "estimated_local_ram_mb": sum(p["ram_cost_mb"] for p in local),
+            "healthy": sum(1 for p in profs if p["status"] == Provider.HEALTHY),
+            "quarantined": sum(1 for p in profs if p["circuit"] == Provider.OPEN),
+        }
 
     @staticmethod
     def _requirement_passes(caps: set) -> list[set]:

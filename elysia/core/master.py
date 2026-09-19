@@ -26,6 +26,8 @@ import time
 from .agents import AgentPipeline
 from .config import Config
 from .events import EventBus
+from .inference import LocalModelPool, ModelRouter
+from .resources import ResourceLedger, ResourceMonitor, ResourcePolicy
 from .executor import TaskExecutor
 from .graph import analyze as analyze_graph
 from .graph import find_cycles, replan as replan_graph
@@ -140,6 +142,12 @@ def persist_goal(goal: str, subs: list[dict], store: TaskStore,
     gid = store.add_task(title=goal[:120] or "goal", description=goal,
                          kind="goal", priority=0, status="done")
     out: list[dict] = []
+    # A goal milestone is not worker output, but it must still carry a result:
+    # the HUD renders "(no result yet)" for a done row with an empty result,
+    # which made a completed milestone look like a broken task.
+    store._update(gid, result=(
+        f"goal milestone — {len(subs)} sub-task(s) queued; "
+        "see them on the board for live progress"))
     for s in subs:
         detail = s.get("detail") or s.get("title") or ""
         files = [f for f in (s.get("owned_files") or extract_owned_files(detail)) if f]
@@ -202,14 +210,38 @@ class MasterController:
             self.tools = build_tools(Workspace(workspace_root), self.events, cfg)
         else:
             self.tools = None
+        # -- resource-aware execution layer (see RESOURCE_ARCHITECTURE.md) ---
+        # ONE monitor, ONE policy, ONE ledger and ONE local-model pool for the
+        # whole controller. Dozens of logical agents share them; the number of
+        # expensive operations stays tiny (heavy_slots=1 by default).
+        rc = getattr(cfg, "resources", None)
+        self.monitor = ResourceMonitor(
+            sample_interval_s=float(getattr(rc, "monitor_sample_interval_s",
+                                            1.0) or 1.0))
+        self.policy = ResourcePolicy.from_config(cfg)
+        self.ledger = ResourceLedger.from_config(cfg, monitor=self.monitor,
+                                                 policy=self.policy)
+        self.pool = LocalModelPool.from_config(providers, ledger=self.ledger,
+                                               monitor=self.monitor,
+                                               events=self.events, cfg=cfg)
+        self.router = ModelRouter.from_config(providers, pool=self.pool,
+                                              ledger=self.ledger,
+                                              monitor=self.monitor,
+                                              policy=self.policy,
+                                              events=self.events, cfg=cfg)
         self.scheduler = Scheduler(store, providers, self.events, cfg=cfg,
-                                   worker_id=worker_id, resources=resources)
+                                   worker_id=worker_id, resources=resources,
+                                   ledger=self.ledger, monitor=self.monitor,
+                                   policy=self.policy,
+                                   warm=self.pool.warm,
+                                   router=self.router)
         self.executor = TaskExecutor(
             self.scheduler, workspace_root, max_tasks=max_tasks,
             run_tests=run_tests, poll_interval_s=poll_interval_s,
             heartbeat_interval_s=heartbeat_interval_s,
             retry_backoff_s=retry_backoff_s, tools=self.tools,
-            memory=self.memory, resources=resources)
+            memory=self.memory, resources=resources,
+            router=self.router, pool=self.pool)
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> "MasterController":
@@ -217,8 +249,12 @@ class MasterController:
         if not self.executor.running:
             self.executor.start()
         self.scheduler.start()
-        self.events.emit("master", status="started", agent_id=self.worker_id,
-                         detail=f"max_tasks={self.executor.max_tasks}")
+        self.pool.start()
+        self.events.emit(
+            "master", status="started", agent_id=self.worker_id,
+            detail=f"max_tasks={self.executor.max_tasks} "
+                   f"local_model_slots={self.pool.max_concurrent} "
+                   f"heavy_slots={self.ledger.limits.get('local_llm')}")
         return self
 
     def stop(self, release: bool = True) -> None:
@@ -226,6 +262,7 @@ class MasterController:
         back to the board so an interrupted run is resumable, never stuck."""
         self.executor.stop()
         self.scheduler.stop()
+        self.pool.stop()
         if release:
             self.store.release_all_for_worker(self.scheduler.worker_id,
                                               self.scheduler.max_attempts)
@@ -240,7 +277,73 @@ class MasterController:
         return AgentPipeline(
             self.providers, self.store, events=self.events,
             cfg=self.cfg if isinstance(self.cfg, Config) else None,
-            memory=self.memory, resources=self.resources, tools=self.tools)
+            memory=self.memory, resources=self.resources, tools=self.tools,
+            router=self.router)
+
+    # -- resource / queue reporting ------------------------------------------
+    def resource_report(self) -> dict:
+        """Who is running, what is queued, and WHY nothing else can start."""
+        r = self.scheduler.resource_status()
+        r["pool"] = self.pool.status()
+        r["router"] = self.router.status()
+        r["providers"] = self.providers.resource_summary()
+        warm = r["pool"].get("warm") or {}
+        r["models"] = [{"provider": k, **v} for k, v in warm.items()]
+        return r
+
+    def queue_report(self) -> dict:
+        """Every not-yet-started task with its blocking reason."""
+        waiting = self.scheduler.why_waiting()
+        running = [t for status in ("claimed", "running", "testing", "reviewing")
+                   for t in self.store.list(status=status, limit=50)]
+        pool = self.pool.status()
+        return {"waiting": waiting,
+                "running": [{"task_id": t["id"], "title": (t.get("title") or "")[:80],
+                             "status": t["status"],
+                             "priority_class": t.get("priority_class"),
+                             "resource_class": t.get("resource_class"),
+                             "worker": t.get("worker"),
+                             "provider": t.get("provider"),
+                             "model": t.get("model")} for t in running],
+                "local_slot": {"slots": pool.get("slots"),
+                               "running": len(pool.get("running") or []),
+                               "queued": pool.get("queued_count"),
+                               "not_held": self.ledger.counts().get("local_llm", 0)},
+                "resources": self.scheduler.resource_status()["snapshot"]}
+
+    def efficiency_report(self, task_id: int | None = None,
+                          limit: int = 10) -> dict:
+        """AI calls vs deterministic checks per task — the real cost picture."""
+        rows = []
+        tasks = ([self.store.get(task_id)] if task_id is not None
+                 else self.store.list(limit=limit))
+        for t in tasks:
+            if not t:
+                continue
+            usage = t.get("usage_json") or {}
+            rows.append({
+                "task_id": t["id"],
+                "title": (t.get("title") or "")[:70],
+                "status": t["status"],
+                "resource_class": t.get("resource_class"),
+                "priority_class": t.get("priority_class"),
+                "ai_calls": int(usage.get("requests") or 0),
+                "deterministic_checks": int(usage.get("deterministic_checks")
+                                            or usage.get("checks") or 0),
+                "tokens_in": int(usage.get("tokens_in") or 0),
+                "tokens_out": int(usage.get("tokens_out") or 0),
+                "ai_seconds": round(float(usage.get("latency_s") or 0.0), 2),
+                "failures": int(usage.get("failures") or 0),
+                "retries": int(t.get("retries") or 0),
+                "estimated_cost_usd": round(float(t.get("cost_usd") or 0.0), 6),
+            })
+        totals = {k: round(sum(r[k] for r in rows), 3) if k.endswith(("s", "usd"))
+                  else sum(r[k] for r in rows)
+                  for k in ("ai_calls", "deterministic_checks", "tokens_in",
+                            "tokens_out", "ai_seconds", "failures", "retries",
+                            "estimated_cost_usd")}
+        return {"tasks": rows, "totals": totals,
+                "note": "token counts are estimates; checks are real tool runs"}
 
     def workspace_summary(self) -> str:
         """What repository are we in, and how is it built (project intel).

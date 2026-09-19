@@ -38,7 +38,8 @@ class TaskExecutor:
                  poll_interval_s: float = 2.0,
                  retry_backoff_s: float | None = None,
                  capabilities: list[str] | None = None,
-                 tools=None, memory=None, resources=None):
+                 tools=None, memory=None, resources=None, router=None,
+                 pool=None):
         self.sched = scheduler
         self.store: TaskStore = scheduler.store
         self.providers: ProviderManager = scheduler.providers
@@ -56,6 +57,10 @@ class TaskExecutor:
         # pipeline — one store per process, never one per task.
         self.memory = memory
         self.resources = resources
+        # Resource-aware router + shared local model pool (Phase: resource
+        # execution). One pool per process: logical agents share the model.
+        self.router = router
+        self.pool = pool
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._inflight: set[int] = set()
@@ -134,7 +139,8 @@ class TaskExecutor:
             pipeline = AgentPipeline(self.providers, self.store,
                                      events=self.events, cfg=self._cfg(),
                                      tools=self.tools, memory=self.memory,
-                                     resources=self.resources)
+                                     resources=self.resources,
+                                     router=self.router)
             if self.retry_backoff_s is not None:
                 pipeline._backoff_s = lambda: float(self.retry_backoff_s)
             outcome = pipeline.solve_task(task, self.workspace_root,

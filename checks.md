@@ -9,7 +9,18 @@ Run these in order; the whole envelope must stay green.
 python3 -m unittest discover -s tests -v
 ```
 
-Expected: **all tests pass** (currently 341), including the
+Expected: **all tests pass** (currently 402), including the
+`tests/test_resource_execution.py` bundle (see `RESOURCE_ARCHITECTURE.md`):
+resource-aware execution — 20 logical agents through ONE local model slot
+(peak concurrency = 1), priority/aging fairness, the CPU/RAM admission ladder,
+heavy-slot exclusivity, warm-model hysteresis, `local_only` privacy routing,
+provider-slot reservations, deterministic-first checks and the model-server
+lifecycle — plus the
+`tests/test_front_door.py` bundle: the Jarvis front door routes repo/machine
+questions to the real environment (git remotes, `gh`, workspace) and goal
+follow-ups ("is it done") to durable board state, goal milestones carry a real
+result, and the HUD's legacy counters map canonical `ready`/`completed`
+statuses — plus the
 `tests/test_features.py` bundle covering context budgeting, telemetry/cost,
 tool risk gating, computer permissions + shell gating, skills risk assessment
 (intent-based, false-positive free), templates expansion, research engine

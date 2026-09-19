@@ -27,6 +27,62 @@ def _board_line(store) -> str:
             f"{failed} failed" + (f", {blocked} blocked" if blocked else ""))
 
 
+TERMINAL_OK = {"completed", "done"}
+TERMINAL_BAD = {"failed", "dependency_failed", "cancelled"}
+ACTIVE = {"ready", "claimed", "running", "testing", "reviewing",
+          "retrying", "queued"}
+
+
+def goal_progress(store, goal_id: int | None = None, max_tasks: int = 10) -> str:
+    """Trace of the latest (or named) goal and its sub-tasks.
+
+    This is the canonical answer to "is it done?" — it reads durable board
+    state, so it reports the truth even when the workflow is still running or
+    a worker died. Never raises; an empty board is stated plainly.
+    """
+    try:
+        rows = store.list(limit=4000)
+    except Exception as e:  # noqa: BLE001
+        return f"board unavailable: {e}"
+    goals = [t for t in rows if (t.get("kind") or "task") == "goal"]
+    if not goals:
+        return ("No goal has been submitted yet. Submit one from the HUD "
+                "chat or with `elysia master run \"<goal>\"`.")
+    goals.sort(key=lambda t: t.get("id", 0), reverse=True)
+    goal = None
+    if goal_id is not None:
+        goal = next((g for g in goals if g.get("id") == goal_id), None)
+    goal = goal or goals[0]
+    gid = goal.get("id")
+    subs = [t for t in rows if gid in (t.get("dependencies") or [])]
+    done = sum(1 for t in subs if t.get("status") in TERMINAL_OK)
+    failed = sum(1 for t in subs if t.get("status") in TERMINAL_BAD)
+    active = sum(1 for t in subs if t.get("status") in ACTIVE)
+    total = len(subs)
+    if not total:
+        verdict = "no sub-tasks were planned"
+    elif done == total:
+        verdict = "DONE — every sub-task completed"
+    elif failed and done + failed == total:
+        verdict = (f"stopped — {failed} sub-task(s) failed, {done} completed")
+    else:
+        verdict = (f"still running — {done}/{total} sub-task(s) completed, "
+                   f"{active} active, {failed} failed")
+    lines = [f"Goal #{gid}: {(goal.get('title') or '')[:110]}",
+             f"  {verdict}"]
+    subs.sort(key=lambda t: t.get("id", 0))
+    for t in subs[:max_tasks]:
+        who = t.get("worker") or t.get("agent_role") or "-"
+        row = (f"    #{t.get('id')} [{t.get('status')}] {who}: "
+               f"{(t.get('title') or '')[:70]}")
+        if t.get("last_error"):
+            row += f"  (error: {str(t['last_error'])[:80]})"
+        lines.append(row)
+    if total > max_tasks:
+        lines.append(f"    … {total - max_tasks} more sub-task(s)")
+    return "\n".join(lines)
+
+
 def _provider_line(pm) -> str:
     try:
         rows = pm.health_report()
@@ -114,6 +170,15 @@ def brief(topic: str = "", store=None, providers=None, workspace_root: str = "",
             if digest:
                 sections.append(("Knowledge", digest[:1600]))
         except Exception:  # noqa: BLE001
+            pass
+
+    # 4b) live progress of the latest goal (answers "is it done?")
+    if store is not None:
+        try:
+            progress = goal_progress(store)
+            if not progress.startswith("No goal has been submitted"):
+                sections.append(("Latest goal", progress))
+        except Exception:  # noqa: BLE001 — a briefing must never fail
             pass
 
     # 5) next action

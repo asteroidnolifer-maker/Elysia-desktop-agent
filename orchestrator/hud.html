@@ -375,12 +375,15 @@ function renderAgents(list){
 async function showDetail(id){
   try{const r=await jget("/api/tasks?id="+id);
     const t=r.task;if(!t)return;
-    $("#d-title").textContent=`#${t.id} — ${t.title}`;
-    $("#d-meta").textContent=`status ${t.status}  ·  priority ${t.priority}  ·  `+
-      (t.worker?"worker "+t.worker:"no worker")+"  ·  created "+est(t.created_at)+
+    const isGoal=(t.kind==="goal");
+    $("#d-title").textContent=`#${t.id}${isGoal?" [GOAL]":""} — ${t.title}`;
+    $("#d-meta").textContent=`${isGoal?"goal milestone":"task"}  ·  status ${t.status}  ·  priority ${t.priority}  ·  `+
+      (isGoal?"(not worker output)":(t.worker?"worker "+t.worker:"no worker"))+
+      "  ·  created "+est(t.created_at)+
       (t.done_at?"  ·  done "+est(t.done_at):"");
     $("#d-desc").textContent=t.description||"(none)";
-    $("#d-res").textContent=(t.result||"(no result yet)")+"\n\nOWNED FILES:\n"+(t.files&&t.files.length?t.files.join("\n"):"(none)");
+    $("#d-res").textContent=(t.result||(isGoal?"(goal milestone)":"(no result yet)"))+
+      (isGoal?"":"\n\nOWNED FILES:\n"+(t.files&&t.files.length?t.files.join("\n"):"(none)"));
     $("#detail").classList.add("open");
   }catch(e){}
 }

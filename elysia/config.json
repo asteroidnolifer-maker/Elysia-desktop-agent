@@ -9,7 +9,37 @@
     "lease_seconds": 1200,
     "heartbeat_grace_s": 60,
     "resource_reserve_mb": 1536,
-    "worker_est_mb": 600
+    "worker_est_mb": 600,
+    "dispatch_aging_s": 30,
+    "interactive_preempt": true
+  },
+  "resources": {
+    "heavy_slots": 1,
+    "local_llm_concurrency": 1,
+    "remote_slots": 8,
+    "io_slots": 4,
+    "network_slots": 8,
+    "heavy_exclusive": true,
+    "cpu_busy_pct": 50,
+    "cpu_high_pct": 75,
+    "cpu_critical_pct": 90,
+    "ram_min_free_mb": 2048,
+    "ram_block_infer_mb": 1024,
+    "swap_max_used_mb": 1024,
+    "temp_max_c": 90,
+    "prefer_remote_when_saturated": true,
+    "allow_remote_under_pressure": true,
+    "inference_timeout_s": 900,
+    "model_idle_ttl_s": 900,
+    "model_warm_min_s": 300,
+    "pressure_hold_s": 20,
+    "analysis_cache_ttl_s": 300,
+    "max_model_calls_per_task": 0,
+    "monitor_sample_interval_s": 1
+  },
+  "privacy": {
+    "local_only": false,
+    "sensitive_globs": ["*.env", "*.key", "*.pem", "*.p12", "**/secrets/**", "**/credentials/**"]
   },
   "git": {
     "auto_checkpoint": false,
@@ -31,7 +61,11 @@
       "concurrency": 2,
       "timeout_s": 900,
       "max_tokens": 2048,
-      "temperature": 0.2
+      "temperature": 0.2,
+      "local": true,
+      "ram_cost_mb": 4700,
+      "cpu_cost": 1.0,
+      "privacy": "local_only"
     }
   ]
 }
