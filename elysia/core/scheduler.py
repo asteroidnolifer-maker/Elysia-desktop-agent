@@ -103,6 +103,7 @@ class Scheduler:
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
+        self._stop.clear()  # Allow restart after stop
         t = threading.Thread(target=self._loop, daemon=True, name="sched-loop")
         t.start()
         self._threads.append(t)

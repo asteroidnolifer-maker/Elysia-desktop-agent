@@ -392,7 +392,7 @@ class TestBrainDelegation(unittest.TestCase):
         pm = ProviderManager()
         fake_provider(pm, "a", outcomes=[("", "http 500: nope")])
         fake_provider(pm, "b", outcomes=[("answer from B", "")])
-        with mock.patch.object(brain, "_manager", return_value=pm):
+        with mock.patch.object(brain, "_manager_override", pm):
             text, err = brain.chat([{"role": "user", "content": "hi"}])
         self.assertEqual(text, "answer from B")
         self.assertEqual(err, "")
@@ -403,7 +403,7 @@ class TestBrainDelegation(unittest.TestCase):
         import orchestrator.brain as brain
         pm = ProviderManager()
         fake_provider(pm, "a", outcomes=[("", "err")], status="unavailable")
-        with mock.patch.object(brain, "_manager", return_value=pm):
+        with mock.patch.object(brain, "_manager_override", pm):
             for p in pm.list():
                 p.check_health = lambda p=p: p.status
             self.assertFalse(brain.health())   # all unhealthy

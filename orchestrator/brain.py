@@ -34,11 +34,19 @@ from elysia.core.brain import (
 )
 
 # Backward compatibility: _manager for legacy tests that patch it
-# Allow tests to do: `with mock.patch.object(brain, "_manager", pm):`
-# This variable is used by the canonical module's _manager() function
+# The canonical module's _manager() function checks this module's _manager_override
+# Tests can do: `with mock.patch.object(brain, "_manager_override", pm):`
+# or `with mock.patch.object(brain, "_manager", pm):` if we also sync
+
+# Make _manager a simple module variable that tests can patch
+# When set, also update the canonical module's override
+_manager = None
+
+# Legacy _manager_override for tests that patch it directly
+# This is what the canonical _manager() function checks
 _manager_override = None
 
-# Canonical functions
+# Re-export canonical functions
 from elysia.core.brain import (
     SYSTEM_PROMPT,
     chat,
@@ -48,18 +56,8 @@ from elysia.core.brain import (
     health,
 )
 
-# Backward compatibility: _manager for legacy tests that patch it
-# Allow tests to do: `with mock.patch.object(brain, "_manager", pm):`
-_manager = None
-
-# Keep _manager and _manager_override in sync
-# When tests patch _manager, also update the canonical module
-def _sync_manager_override():
-    import elysia.core.brain
-    elysia.core.brain._manager_override = _manager_override
-
-# Backward compatibility: _manager for legacy tests that patch it
-_manager = None
+# Re-export _manager_override for tests that patch it directly
+from elysia.core.brain import _manager_override
 
 __all__ = [
     "SYSTEM_PROMPT",

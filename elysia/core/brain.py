@@ -69,6 +69,15 @@ def _manager():
     """
     global _manager_instance, _manager_override, _MANAGER_SIG
     # Allow tests to override the manager completely
+    # Check orchestrator.brain._manager first (legacy test patching)
+    # Then check both local _manager_override and orchestrator.brain._manager_override
+    import sys
+    if 'orchestrator.brain' in sys.modules:
+        orch_brain = sys.modules['orchestrator.brain']
+        if getattr(orch_brain, '_manager', None) is not None:
+            return orch_brain._manager
+        if getattr(orch_brain, '_manager_override', None) is not None:
+            return orch_brain._manager_override
     if _manager_override is not None:
         return _manager_override
     from elysia.core.config import ProviderConfig
