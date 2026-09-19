@@ -27,7 +27,7 @@
       "base_url": "http://127.0.0.1:11434/v1",
       "api_key": "none",
       "model": "qwen2.5-coder:7b",
-      "capabilities": ["chat", "coding"],
+      "capabilities": ["chat", "coding", "reasoning"],
       "concurrency": 2,
       "timeout_s": 900,
       "max_tokens": 2048,

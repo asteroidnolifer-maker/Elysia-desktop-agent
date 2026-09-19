@@ -70,8 +70,9 @@ class TestToolCatalog(unittest.TestCase):
         # not in catalog -> honest error, no crash
         self.assertFalse(r2["installed"])
         self.assertIn("error", r2)
-        r3 = tc.detect("nmap")
-        self.assertFalse(r3["installed"])   # dev sandbox has no nmap
+        # Use a tool that's definitely not installed on any CI/dev machine
+        r3 = tc.detect("ghidra")
+        self.assertFalse(r3["installed"])
         self.assertEqual(r3["group"], "security")
 
     def test_alias_probe(self):

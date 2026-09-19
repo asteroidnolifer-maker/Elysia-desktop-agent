@@ -120,6 +120,8 @@ class IntegrationTestCase(unittest.TestCase):
         for name in ("a", "b"):
             pm.get(name).cfg.concurrency = 1
         sched = self._scheduler(store, pm, EventBus())
+        # Override budget to not depend on host RAM/CPU load
+        sched.current_budget = lambda: 10
         claimed = sched.dispatch_once(max_tasks=10)
         # 3 tasks but only 2 provider slots -> exactly 2 claimed
         self.assertEqual(len(claimed), 2)
